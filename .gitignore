@@ -1,0 +1,30 @@
+# Build output
+build/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+
+# Whisper models (large binary files — download at setup)
+models/
+
+# macOS
+.DS_Store
+*.DS_Store
+
+# User config (contains API keys)
+# The bundled config.json is committed; ~/.thomas-voice/config.json is not
+# (it lives outside the repo)
+
+# Logs
+*.log
+
+# PyInstaller
+*.spec.bak
+
+# Old spec
+thomas-voice.spec

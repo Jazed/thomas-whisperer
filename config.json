@@ -1,0 +1,37 @@
+{
+  "api_provider": "local",
+  "local_whisper_model": "base",
+  "gemini_api_key": "",
+  "gemini_model": "gemini-2.0-flash",
+  "openai_api_key": "",
+  "anthropic_api_key": "",
+  "post_process_with_claude": false,
+  "hotkey": {
+    "modifiers": ["fn", "control"],
+    "key": ""
+  },
+  "translate_hotkey": {
+    "modifiers": ["control", "option"],
+    "key": ""
+  },
+  "translation": {
+    "provider": "whisper",
+    "target_language": "en",
+    "model": "base"
+  },
+  "mode": "push_to_talk",
+  "language": ["nl", "en"],
+  "language_models": {
+    "nl": "small",
+    "en": "base"
+  },
+  "overlay_position": "bottom-center",
+  "dictionary": {
+    "use effect": "useEffect",
+    "use state": "useState",
+    "use ref": "useRef",
+    "use callback": "useCallback",
+    "use memo": "useMemo",
+    "use context": "useContext"
+  }
+}
