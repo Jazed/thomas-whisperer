@@ -4,6 +4,34 @@ import threading
 import subprocess
 import Quartz
 import CoreFoundation
+
+# Force-resolve all framework symbols used in background threads.
+# PyObjC's lazy-import uses funcmap.pop() which is NOT thread-safe —
+# two threads hitting the same symbol simultaneously → KeyError.
+from CoreFoundation import (
+    CFMachPortCreateRunLoopSource,
+    CFRunLoopGetCurrent,
+    CFRunLoopAddSource,
+    CFRunLoopRun,
+    CFRunLoopStop,
+    kCFRunLoopCommonModes,
+)
+from Quartz import (
+    CGEventTapEnable,
+    CGEventTapCreate,
+    CGEventMaskBit,
+    CGEventGetFlags,
+    CGEventGetIntegerValueField,
+    kCGHIDEventTap,
+    kCGHeadInsertEventTap,
+    kCGEventTapOptionDefault,
+    kCGEventKeyDown,
+    kCGEventKeyUp,
+    kCGEventFlagsChanged,
+    kCGKeyboardEventKeycode,
+    kCGKeyboardEventAutorepeat,
+)
+
 from config import cfg
 
 _KEY_CODES = {
@@ -93,12 +121,12 @@ class HotkeyListener:
     # ------------------------------------------------------------------ matching
 
     def _matches(self, event) -> bool:
-        key   = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+        key   = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
         if key != self._key_code:
             return False
         if self._mod_flags == 0:
             return True
-        flags = Quartz.CGEventGetFlags(event) & 0xFFFF0000
+        flags = CGEventGetFlags(event) & 0xFFFF0000
         return bool(flags & self._mod_flags)
 
     # ------------------------------------------------------------------ callback
@@ -112,13 +140,13 @@ class HotkeyListener:
 
     def _callback_fn(self, event_type, event):
         """Handle Fn+<modifier(s)> via FlagsChanged AND Fn-keydown (Mac-dependent)."""
-        flags = Quartz.CGEventGetFlags(event)
+        flags = CGEventGetFlags(event)
         fn_held = bool(flags & _FN_FLAG)
         # All non-Fn modifiers configured must also be held
         extra_met = (self._mod_flags == 0) or \
                     ((flags & self._mod_flags) == self._mod_flags)
 
-        if event_type == Quartz.kCGEventFlagsChanged:
+        if event_type == kCGEventFlagsChanged:
             active = fn_held and extra_met
             if active and not self._pressed:
                 self._pressed = True
@@ -130,14 +158,14 @@ class HotkeyListener:
                 except Exception as e: print(f"[hotkey] on_release: {e}", file=sys.stderr)
 
         # Fallback: some Macs fire keydown/up for the Fn key (keycode 63)
-        elif event_type == Quartz.kCGEventKeyDown:
-            kc = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+        elif event_type == kCGEventKeyDown:
+            kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
             if kc == _FN_KEYCODE and extra_met and not self._pressed:
                 self._pressed = True
                 try:   self.on_press()
                 except Exception as e: print(f"[hotkey] on_press: {e}", file=sys.stderr)
-        elif event_type == Quartz.kCGEventKeyUp:
-            kc = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
+        elif event_type == kCGEventKeyUp:
+            kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
             if kc == _FN_KEYCODE and self._pressed:
                 self._pressed = False
                 try:   self.on_release()
@@ -147,9 +175,9 @@ class HotkeyListener:
 
     def _callback_modifier_only(self, event_type, event):
         """Handle pure modifier combos (e.g. Ctrl+Option) via FlagsChanged."""
-        if event_type != Quartz.kCGEventFlagsChanged:
+        if event_type != kCGEventFlagsChanged:
             return event
-        flags  = Quartz.CGEventGetFlags(event)
+        flags  = CGEventGetFlags(event)
         # Active when ALL configured modifier flags are held
         active = bool(self._mod_flags) and \
                  ((flags & self._mod_flags) == self._mod_flags)
@@ -164,15 +192,15 @@ class HotkeyListener:
         return event
 
     def _callback_key(self, event_type, event):
-        if event_type == Quartz.kCGEventKeyDown and self._matches(event):
-            if Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventAutorepeat):
+        if event_type == kCGEventKeyDown and self._matches(event):
+            if CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat):
                 return None  # suppress autorepeat for hotkey only
             if not self._pressed:
                 self._pressed = True
                 try:   self.on_press()
                 except Exception as e: print(f"[hotkey] on_press: {e}", file=sys.stderr)
             return None
-        if event_type == Quartz.kCGEventKeyUp and self._matches(event):
+        if event_type == kCGEventKeyUp and self._matches(event):
             if self._pressed:
                 self._pressed = False
                 try:   self.on_release()
@@ -207,14 +235,14 @@ class HotkeyListener:
             time.sleep(3)
 
     def _create_tap(self) -> bool:
-        mask = (Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown)      |
-                Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)         |
-                Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged))
+        mask = (CGEventMaskBit(kCGEventKeyDown)      |
+                CGEventMaskBit(kCGEventKeyUp)         |
+                CGEventMaskBit(kCGEventFlagsChanged))
 
-        tap = Quartz.CGEventTapCreate(
-            Quartz.kCGHIDEventTap,
-            Quartz.kCGHeadInsertEventTap,
-            Quartz.kCGEventTapOptionDefault,
+        tap = CGEventTapCreate(
+            kCGHIDEventTap,
+            kCGHeadInsertEventTap,
+            kCGEventTapOptionDefault,
             mask,
             self._callback,
             None,
@@ -226,11 +254,11 @@ class HotkeyListener:
         self._tap = tap
 
         def _run():
-            src = CoreFoundation.CFMachPortCreateRunLoopSource(None, tap, 0)
-            self._run_loop = CoreFoundation.CFRunLoopGetCurrent()
-            CoreFoundation.CFRunLoopAddSource(self._run_loop, src, CoreFoundation.kCFRunLoopCommonModes)
+            src = CFMachPortCreateRunLoopSource(None, tap, 0)
+            self._run_loop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(self._run_loop, src, kCFRunLoopCommonModes)
             Quartz.CGEventTapEnable(tap, True)
-            CoreFoundation.CFRunLoopRun()
+            CFRunLoopRun()
 
         threading.Thread(target=_run, daemon=True, name="hotkey-runloop").start()
         return True
@@ -239,7 +267,7 @@ class HotkeyListener:
         if self._tap:
             Quartz.CGEventTapEnable(self._tap, False)
         if self._run_loop:
-            CoreFoundation.CFRunLoopStop(self._run_loop)
+            CFRunLoopStop(self._run_loop)
 
 
 # ------------------------------------------------------------------ accessibility

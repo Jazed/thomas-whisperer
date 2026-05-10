@@ -1,14 +1,16 @@
 import sys
+import os
+import signal
 import traceback
 import threading
 import multiprocessing
-import fcntl
+import time
 from pathlib import Path
 import AppKit
 from app import AppController
 
-_LOG_FILE = Path.home() / ".thomas-voice" / "app.log"
-_LOCK_FD  = None
+_LOG_FILE  = Path.home() / ".thomas-voice" / "app.log"
+_PID_FILE  = Path.home() / ".thomas-voice" / "app.pid"
 
 
 def _setup_logging() -> None:
@@ -52,24 +54,46 @@ def _setup_logging() -> None:
     threading.excepthook = _thread_excepthook
 
 
-def _acquire_lock() -> bool:
-    global _LOCK_FD
-    lock_path = Path.home() / ".thomas-voice" / "app.lock"
-    lock_path.parent.mkdir(exist_ok=True)
-    _LOCK_FD = open(lock_path, "w")
+def _kill_existing() -> None:
+    """Kill all other python processes running main.py, then write our PID."""
+    import subprocess
+    _PID_FILE.parent.mkdir(exist_ok=True)
+    my_pid = os.getpid()
+
+    # Find all other python processes running main.py
     try:
-        fcntl.flock(_LOCK_FD, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return True
-    except OSError:
-        return False
+        result = subprocess.run(
+            ["pgrep", "-if", "python.*main\\.py"],  # -i: case-insensitive (macOS Python = capital P)
+            capture_output=True, text=True,
+        )
+        pids = [int(p) for p in result.stdout.split() if p.strip() and int(p) != my_pid]
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if pids:
+            time.sleep(1.0)
+    except Exception:
+        pass
+
+    _PID_FILE.write_text(str(my_pid))
+
+
+def _cleanup_pid() -> None:
+    try:
+        if _PID_FILE.exists() and int(_PID_FILE.read_text()) == os.getpid():
+            _PID_FILE.unlink()
+    except Exception:
+        pass
 
 
 def main() -> None:
     _setup_logging()
+    _kill_existing()
 
-    if not _acquire_lock():
-        print("ThomasWhisperer is already running.", file=sys.stderr)
-        sys.exit(0)
+    import atexit
+    atexit.register(_cleanup_pid)
 
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)

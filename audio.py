@@ -9,10 +9,11 @@ CHANNELS    = 1
 DTYPE       = "int16"
 MAX_SECONDS = 60
 
-_lock      = threading.Lock()
+_lock         = threading.Lock()
 _buffer: list[np.ndarray] = []
-_recording = False
-_level     = 0.0
+_recording    = False
+_stop_pending = False
+_level        = 0.0
 _stream: sd.InputStream | None = None
 
 
@@ -72,26 +73,43 @@ def start_recording() -> None:
         _recording = True
 
 
-def stop_recording() -> bytes:
-    global _recording, _level
+def signal_stop() -> bool:
+    """Mark recording for stop. MUST stay non-blocking — called on the CGEventTap
+    callback thread. macOS disables the tap if the callback blocks (even 200 ms
+    is enough to kill both hotkeys). Heavy work goes in flush_and_get(), which
+    must run in a background thread."""
+    global _stop_pending, _recording
     with _lock:
-        if not _recording:
-            return b""
-        _recording = False
+        if not _recording or _stop_pending:
+            return False
+        _stop_pending = True
+    return True
 
-    # Wait 200 ms so any audio already in the callback pipeline gets flushed
-    # into _buffer before we read it — prevents the last syllable being cut off.
+
+def flush_and_get() -> bytes:
+    """Wait for the audio tail, stop recording, then return buffered audio as WAV bytes.
+    Call this in a background thread after signal_stop()."""
     import time as _time
-    _time.sleep(0.20)
-
+    global _recording, _stop_pending, _level
+    _time.sleep(0.35)   # keep recording 350ms after key release to capture word endings
+    with _lock:
+        _recording = False
+        _stop_pending = False
+    _time.sleep(0.05)   # let the last callback cycle complete
     _level = 0.0
-
     if not _buffer:
         return b""
-
     audio = np.concatenate(_buffer, axis=0)
     audio = _trim_silence(audio)
     return _to_wav_bytes(audio)
+
+
+def stop_recording() -> bytes:
+    """Stop recording and return audio. Blocks ~200 ms for pipeline flush.
+    Prefer signal_stop() + flush_and_get() when called from a callback thread."""
+    if not signal_stop():
+        return b""
+    return flush_and_get()
 
 
 def _trim_silence(audio: np.ndarray, threshold_db: float = -40.0) -> np.ndarray:

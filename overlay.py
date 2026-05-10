@@ -312,8 +312,18 @@ class OverlayPanel:
             nw = _MINI_W
         else:
             nw = self._idle_w
-        top_y = self._sh - self._menu_h - _H_H - 12
-        return NSMakeRect((self._sw - nw) / 2, top_y, nw, _H_H)
+
+        # Use current window position if already placed; default to top-center on first launch
+        try:
+            cur = self._panel.frame()
+            cx  = cur.origin.x + cur.size.width / 2   # keep center x
+            ny  = cur.origin.y                          # keep y (user may have dragged)
+        except Exception:
+            top_y = self._sh - self._menu_h - _H_H - 12
+            cx    = self._sw / 2
+            ny    = top_y
+
+        return NSMakeRect(cx - nw / 2, ny, nw, _H_H)
 
     def toggle_minimized(self):
         _run_on_main(self._do_toggle)

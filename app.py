@@ -243,13 +243,21 @@ class AppController(NSObject):
         import audio
         self._state = "processing"
         self._overlay.set_state("processing")
-        duration    = time.monotonic() - self._record_start
-        audio_bytes = audio.stop_recording()
+        duration = time.monotonic() - self._record_start
+        # Mark stop (non-blocking) so the CGEventTap callback returns fast;
+        # flush_and_get() in the thread keeps recording 350ms more to capture word endings.
+        audio.signal_stop()
         threading.Thread(
-            target=self._transcribe_and_inject,
-            args=(audio_bytes, duration),
+            target=self._stop_and_transcribe,
+            args=(duration,),
             daemon=True,
         ).start()
+
+    @objc.python_method
+    def _stop_and_transcribe(self, duration: float) -> None:
+        import audio
+        audio_bytes = audio.flush_and_get()
+        self._transcribe_and_inject(audio_bytes, duration)
 
     # ------------------------------------------------------------------ translate hotkey
 
@@ -274,13 +282,19 @@ class AppController(NSObject):
         import audio
         self._state = "processing"
         self._overlay.set_state("translating")  # purple "Translating…"
-        duration    = time.monotonic() - self._record_start
-        audio_bytes = audio.stop_recording()
+        duration = time.monotonic() - self._record_start
+        audio.signal_stop()
         threading.Thread(
-            target=self._translate_and_inject,
-            args=(audio_bytes, duration),
+            target=self._stop_and_translate,
+            args=(duration,),
             daemon=True,
         ).start()
+
+    @objc.python_method
+    def _stop_and_translate(self, duration: float) -> None:
+        import audio
+        audio_bytes = audio.flush_and_get()
+        self._translate_and_inject(audio_bytes, duration)
 
     def _translate_and_inject(self, audio_bytes: bytes, duration: float) -> None:
         import transcribe, inject, dictionary, history
