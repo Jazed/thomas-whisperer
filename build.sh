@@ -59,28 +59,36 @@ arch -arm64 "$PYTHON" -m pip install --upgrade pip -q
 arch -arm64 "$PYTHON" -m pip install pyinstaller faster-whisper sounddevice numpy \
     pyobjc-core pyobjc-framework-Cocoa \
     pyobjc-framework-Quartz pyobjc-framework-ApplicationServices \
+    mlx-whisper \
     -q
 
-echo "=== Bundling Whisper models ==="
+echo "=== Preparing models ==="
 python - <<'PYEOF'
 import json, shutil, sys
 from pathlib import Path
 
-cfg        = json.load(open("config.json"))
-lang_models = cfg.get("language_models") or {}
-sizes      = set(lang_models.values()) | {cfg.get("local_whisper_model", "base")}
+cfg      = json.load(open("config.json"))
+provider = cfg.get("api_provider", "local")
 
-for size in sizes:
-    dest = Path("models") / size
-    if dest.exists():
-        print(f"  '{size}' already bundled — skipping.")
-        continue
-    print(f"  Downloading '{size}' from HuggingFace…")
+if provider == "mlx":
+    model = cfg.get("mlx_whisper_model", "mlx-community/whisper-large-v3-turbo")
     from huggingface_hub import snapshot_download
-    src = Path(snapshot_download(f"Systran/faster-whisper-{size}"))
-    dest.parent.mkdir(exist_ok=True)
-    shutil.copytree(src, dest, symlinks=False)
-    print(f"  '{size}' bundled ({sum(f.stat().st_size for f in dest.rglob('*') if f.is_file()) // 1_000_000} MB).")
+    cache = Path(snapshot_download(model))
+    print(f"  MLX model '{model}' ready ({sum(f.stat().st_size for f in cache.rglob('*') if f.is_file()) // 1_000_000} MB cached).")
+else:
+    lang_models = cfg.get("language_models") or {}
+    sizes = set(lang_models.values()) | {cfg.get("local_whisper_model", "base")}
+    for size in sizes:
+        dest = Path("models") / size
+        if dest.exists():
+            print(f"  '{size}' already bundled — skipping.")
+            continue
+        print(f"  Downloading '{size}' from HuggingFace…")
+        from huggingface_hub import snapshot_download
+        src = Path(snapshot_download(f"Systran/faster-whisper-{size}"))
+        dest.parent.mkdir(exist_ok=True)
+        shutil.copytree(src, dest, symlinks=False)
+        print(f"  '{size}' bundled ({sum(f.stat().st_size for f in dest.rglob('*') if f.is_file()) // 1_000_000} MB).")
 PYEOF
 
 echo "=== Generating icon ==="
