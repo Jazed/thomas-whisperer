@@ -25,7 +25,10 @@
     "nl": "small",
     "en": "base"
   },
+  "input_device": null,
+  "mute_output_during_bluetooth_recording": true,
   "overlay_position": "bottom-center",
+  "overlay_opacity": 0.6,
   "dictionary": {
     "use effect": "useEffect",
     "use state": "useState",

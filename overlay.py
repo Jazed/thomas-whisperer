@@ -1,10 +1,36 @@
 """
 Overlay UI — drawRect_ based.
 """
-import math, time, sys
+import json, math, time, sys, os, threading
 import objc
 
 import audio as _audio
+
+_CFG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+
+def _load_opacity():
+    try:
+        with open(_CFG_PATH) as f:
+            return float(json.load(f).get("overlay_opacity", 0.6))
+    except Exception:
+        return 0.6
+
+
+def _watch_opacity(view):
+    last_mtime = None
+    last_opacity = None
+    while True:
+        try:
+            mtime = os.path.getmtime(_CFG_PATH)
+            if mtime != last_mtime:
+                last_mtime = mtime
+                opacity = _load_opacity()
+                if opacity != last_opacity:
+                    last_opacity = opacity
+                    _run_on_main(lambda o=opacity: setattr(view, '_opacity', o))
+        except Exception:
+            pass
+        time.sleep(0.5)
 
 from AppKit import (
     NSWindow, NSGradient, NSView, NSColor, NSBezierPath,
@@ -74,6 +100,7 @@ class _PillView(NSView):
         self._click_cb   = None   # set by OverlayPanel
         self._down_pos   = None
         self._down_time  = 0.0
+        self._opacity    = _load_opacity()
         return self
 
     def isOpaque(self):
@@ -131,22 +158,23 @@ class _PillView(NSView):
         NSBezierPath.fillRect_(b)
 
         # 2. Gradient background
+        op   = self._opacity
         pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(pill_rect, rx, rx)
         try:
             grad = NSGradient.alloc().initWithStartingColor_endingColor_(
-                _col(0.07, 0.07, 0.16, 1.0),   # dark blue-black (top)
-                _col(0.13, 0.07, 0.24, 1.0),   # dark purple (bottom)
+                _col(0.16, 0.16, 0.16, op),
+                _col(0.08, 0.08, 0.08, op),
             )
             grad.drawInBezierPath_angle_(pill, 270)
         except Exception:
-            _col(0.08, 0.08, 0.14, 1.0).set()
+            _col(0.10, 0.10, 0.10, op).set()
             pill.fill()
 
         # 3. Border
         if active:
-            _col(1, 1, 1, 0.95).set()
+            _col(1, 1, 1, 0.62).set()
         else:
-            _col(1, 1, 1, 0.65).set()
+            _col(1, 1, 1, 0.24).set()
         pill.setLineWidth_(stroke_w)
         pill.stroke()
 
@@ -191,13 +219,13 @@ class _PillView(NSView):
 
     @objc.python_method
     def _draw_logo(self, cx, cy, r):
-        # Deep purple-blue circle
-        _col(0.18, 0.10, 0.42, 1.0).set()
+        # Dark grey circle
+        _col(0.22, 0.22, 0.22, 1.0).set()
         NSBezierPath.bezierPathWithOvalInRect_(
             NSMakeRect(cx - r, cy - r, r * 2, r * 2)
         ).fill()
-        # Blue highlight overlay (simulates gradient)
-        _col(0.28, 0.38, 0.82, 0.45).set()
+        # Light grey highlight overlay
+        _col(0.48, 0.48, 0.48, 0.38).set()
         NSBezierPath.bezierPathWithOvalInRect_(
             NSMakeRect(cx - r * 0.62, cy - r * 0.62, r * 1.24, r * 1.24)
         ).fill()
@@ -304,6 +332,9 @@ class OverlayPanel:
         self._panel.orderFrontRegardless()
         print(f"[overlay] visible={self._panel.isVisible()} level={self._panel.level()} "
               f"pos=({f.origin.x},{f.origin.y}) idle_w={self._idle_w}", file=sys.stderr)
+
+        t = threading.Thread(target=_watch_opacity, args=(self._view,), daemon=True)
+        t.start()
 
     def _frame_for(self, state):
         if state == "recording":

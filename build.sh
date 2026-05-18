@@ -115,11 +115,15 @@ if [ -d "dist/ThomasWhisperer.app" ]; then
     echo "  App:  dist/ThomasWhisperer.app"
     echo "  Arch: $built_arch"
     echo ""
-    echo "  To install: cp -r dist/ThomasWhisperer.app /Applications/"
     echo "  To share:   zip -r ThomasWhisperer.zip dist/ThomasWhisperer.app"
     echo ""
-    echo "  On first launch: right-click → Open to bypass Gatekeeper."
-    echo "  Grant Microphone + Accessibility when prompted."
+
+    echo "=== Installing to /Applications ==="
+    cp -r dist/ThomasWhisperer.app /Applications/ThomasWhisperer.app
+    xattr -dr com.apple.quarantine /Applications/ThomasWhisperer.app
+    echo "  Installed — quarantine flag removed, Gatekeeper will not block it."
+    echo ""
+    echo "  Grant Microphone + Accessibility when prompted on first launch."
 else
     echo "Build failed — check output above."
     exit 1
