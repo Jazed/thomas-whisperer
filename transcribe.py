@@ -49,6 +49,8 @@ def transcribe(audio_bytes: bytes) -> tuple[str, str]:
 
     if provider == "local":
         return _transcribe_local(audio_bytes)
+    elif provider == "mlx":
+        return _transcribe_mlx(audio_bytes)
     elif provider == "gemini":
         return _transcribe_gemini(audio_bytes), ""
     elif provider == "openai":
@@ -103,6 +105,42 @@ def _transcribe_local(audio_bytes: bytes) -> tuple[str, str]:
         segments, _ = model.transcribe(buf, beam_size=5, language=detected)
 
     return " ".join(s.text for s in segments).strip(), detected
+
+
+def _transcribe_mlx(audio_bytes: bytes) -> tuple[str, str]:
+    """Transcribe using MLX Whisper — optimised for Apple Silicon Neural Engine."""
+    import os, tempfile
+    import mlx_whisper
+
+    cfg_lang = getattr(cfg, "language", None)
+    model    = getattr(cfg, "mlx_whisper_model", "mlx-community/whisper-large-v3-turbo")
+    allowed  = cfg_lang if isinstance(cfg_lang, list) and cfg_lang else None
+    lang     = cfg_lang if isinstance(cfg_lang, str) else None
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(audio_bytes)
+        tmp = f.name
+
+    try:
+        result   = mlx_whisper.transcribe(tmp, path_or_hf_repo=model, language=lang)
+        detected = result.get("language", lang or "en")
+        text     = result.get("text", "").strip()
+
+        _CLOSER_TO_NL = {"de", "af", "fy", "lb"}
+        if allowed and detected not in allowed:
+            if "nl" in allowed and detected in _CLOSER_TO_NL:
+                detected = "nl"
+            else:
+                detected = allowed[0]
+            print(f"[transcribe] mlx forced → '{detected}'", file=sys.stderr)
+            result   = mlx_whisper.transcribe(tmp, path_or_hf_repo=model, language=detected)
+            text     = result.get("text", "").strip()
+        else:
+            print(f"[transcribe] mlx detected '{detected}'", file=sys.stderr)
+    finally:
+        os.unlink(tmp)
+
+    return text, detected
 
 
 def _transcribe_gemini(audio_bytes: bytes) -> str:
@@ -213,7 +251,18 @@ def _translate_with_llm(text: str, source_lang: str,
 
 
 def warm_up() -> None:
-    if getattr(cfg, "api_provider", "local") != "local":
+    provider = getattr(cfg, "api_provider", "local")
+    if provider == "mlx":
+        import mlx_whisper
+        model = getattr(cfg, "mlx_whisper_model", "mlx-community/whisper-large-v3-turbo")
+        print(f"[transcribe] Pre-loading MLX model '{model}'…", file=sys.stderr)
+        mlx_whisper.transcribe(
+            __import__("numpy").zeros(16000, dtype="float32"),
+            path_or_hf_repo=model,
+        )
+        print("[transcribe] MLX model ready.", file=sys.stderr)
+        return
+    if provider != "local":
         return
     lang_models = getattr(cfg, "language_models", {}) or {}
     if lang_models:
