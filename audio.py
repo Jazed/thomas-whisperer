@@ -190,9 +190,11 @@ def request_permission(on_done: callable) -> None:
 
 
 def warm() -> None:
-    """List available devices at startup. Stream opens on demand to avoid keeping
-    AirPods in low-quality HFP mode while idle."""
+    """List available devices and pre-open the input stream so the first recording
+    is instant — no stream setup on the CGEventTap callback thread."""
     _list_devices()
+    with _lock:
+        _open_stream()
 
 
 def get_audio_level() -> float:
@@ -204,10 +206,12 @@ def start_recording() -> None:
     with _lock:
         if _recording:
             return
-        _open_stream()   # always open fresh — stream is closed between recordings
+        if _stream is None:
+            _open_stream()  # only open if the idle-timeout already closed it
         _buffer.clear()
         _recording = True
-    _duck_output_for_recording()
+    # osascript blocks 100-400 ms — unsafe to run on the CGEventTap callback thread
+    threading.Thread(target=_duck_output_for_recording, daemon=True).start()
 
 
 def signal_stop() -> bool:
@@ -223,10 +227,26 @@ def signal_stop() -> bool:
     return True
 
 
+def _close_stream_after_idle(delay: float) -> None:
+    """Close the input stream after `delay` seconds of non-recording so Bluetooth
+    devices (AirPods) can exit HFP and return to high-quality AAC."""
+    global _stream
+    _time.sleep(delay)
+    with _lock:
+        if not _recording and _stream is not None:
+            try:
+                _stream.stop()
+                _stream.close()
+            except Exception:
+                pass
+            _stream = None
+            print("[audio] Stream closed after idle timeout (AirPods → AAC).", file=sys.stderr)
+
+
 def flush_and_get() -> bytes:
     """Wait for the audio tail, stop recording, then return buffered audio as WAV bytes.
     Call this in a background thread after signal_stop()."""
-    global _recording, _stop_pending, _level, _stream
+    global _recording, _stop_pending, _level
     _time.sleep(0.35)  # keep recording 350ms after key release to capture word endings
     with _lock:
         _recording = False
@@ -234,15 +254,9 @@ def flush_and_get() -> bytes:
     _time.sleep(0.05)  # let the last callback cycle complete
     _level = 0.0
     _restore_output_after_recording()
-    # Close the stream so AirPods exit HFP mode and return to high-quality AAC
-    with _lock:
-        if _stream is not None:
-            try:
-                _stream.stop()
-                _stream.close()
-            except Exception:
-                pass
-            _stream = None
+    # Defer stream close — keeps the stream ready for the next recording while still
+    # allowing AirPods to exit HFP after 30 s of inactivity.
+    threading.Thread(target=_close_stream_after_idle, args=(30.0,), daemon=True).start()
     if not _buffer:
         return b""
     audio = np.concatenate(_buffer, axis=0)
