@@ -21,11 +21,7 @@ _LOG_FILE = Path.home() / ".thomas-voice" / "app.log"
 
 
 def _log(msg: str) -> None:
-    _LOG_FILE.parent.mkdir(exist_ok=True)
-    line = f"{time.strftime('%H:%M:%S')} {msg}\n"
-    print(line, end="", file=sys.stderr)
-    with open(_LOG_FILE, "a") as f:
-        f.write(line)
+    print(f"[app] {msg}", file=sys.stderr)
 
 
 class AppController(NSObject):
@@ -174,7 +170,8 @@ class AppController(NSObject):
 
         for title, action in [("Open config.json…",  "openConfig:"),
                                ("Reload Config",      "reloadConfig:"),
-                               ("View history…",      "openHistory:")]:
+                               ("View history…",      "openHistory:"),
+                               ("View log…",          "openLog:")]:
             item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, "")
             item.setTarget_(self)
             menu.addItem_(item)
@@ -219,6 +216,13 @@ class AppController(NSObject):
             path.write_text("")   # create so Finder can reveal it
         # Reveal in Finder — works whether the file is empty or has entries
         subprocess.Popen(["open", "-R", str(path)])
+
+    def openLog_(self, sender):
+        import subprocess
+        _LOG_FILE.parent.mkdir(exist_ok=True)
+        if not _LOG_FILE.exists():
+            _LOG_FILE.write_text("")
+        subprocess.Popen(["open", str(_LOG_FILE)])
 
     # ------------------------------------------------------------------ hotkey
 

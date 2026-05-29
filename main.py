@@ -5,6 +5,7 @@ import traceback
 import threading
 import multiprocessing
 import time
+from datetime import datetime
 from pathlib import Path
 import AppKit
 from app import AppController
@@ -12,35 +13,94 @@ from app import AppController
 _LOG_FILE  = Path.home() / ".thomas-voice" / "app.log"
 _PID_FILE  = Path.home() / ".thomas-voice" / "app.pid"
 
+_LOG_MAX_BYTES = 512 * 1024   # rotate at 500 KB
+_LOG_BACKUPS   = 3            # keep app.log.1 / .2 / .3
+
 
 def _setup_logging() -> None:
     """
-    - Tee stderr → app.log so every print(..., file=sys.stderr) is captured.
-    - Hook sys.excepthook and threading.excepthook so all crashes land in app.log.
+    Tee stderr → app.log (rotating, timestamped).
+    Every print(..., file=sys.stderr) call gets a full datetime prefix and lands
+    in the log file.  Crashes via sys/threading.excepthook are captured too.
+    Log rotates at 500 KB; three backups are kept (app.log.1 / .2 / .3).
     """
     _LOG_FILE.parent.mkdir(exist_ok=True)
-    log_fh = open(_LOG_FILE, "a", encoding="utf-8", buffering=1)
 
     class _Tee:
-        def __init__(self, *streams):
-            self._s = streams
-        def write(self, data):
-            for s in self._s:
-                try: s.write(data)
-                except Exception: pass
-        def flush(self):
-            for s in self._s:
-                try: s.flush()
-                except Exception: pass
-        def fileno(self):
-            return self._s[0].fileno()
+        """Line-buffered tee: adds timestamps, writes to terminal + rotating file."""
 
-    sys.stderr = _Tee(sys.__stderr__, log_fh)
+        def __init__(self):
+            self._buf     = ""
+            self._written = _LOG_FILE.stat().st_size if _LOG_FILE.exists() else 0
+            self._fh      = open(_LOG_FILE, "a", encoding="utf-8", buffering=1)
+
+        # ---- internal helpers -----------------------------------------------
+
+        def _emit(self, line: str) -> None:
+            ts      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            stamped = f"{ts}  {line}\n"
+            try:
+                sys.__stderr__.write(stamped)
+                sys.__stderr__.flush()
+            except Exception:
+                pass
+            try:
+                self._fh.write(stamped)
+                self._fh.flush()
+                self._written += len(stamped.encode("utf-8"))
+                if self._written >= _LOG_MAX_BYTES:
+                    self._rotate()
+            except Exception:
+                pass
+
+        def _rotate(self) -> None:
+            try:
+                self._fh.close()
+                for i in range(_LOG_BACKUPS - 1, 0, -1):
+                    src = Path(f"{_LOG_FILE}.{i}")
+                    dst = Path(f"{_LOG_FILE}.{i + 1}")
+                    if src.exists():
+                        src.rename(dst)
+                if _LOG_FILE.exists():
+                    _LOG_FILE.rename(Path(f"{_LOG_FILE}.1"))
+                self._fh      = open(_LOG_FILE, "w", encoding="utf-8", buffering=1)
+                self._written = 0
+                self._emit("[startup] Log rotated.")
+            except Exception:
+                pass
+
+        # ---- public interface (file-like) ------------------------------------
+
+        def write(self, data: str) -> None:
+            self._buf += data
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                if line.strip():   # skip blank lines
+                    self._emit(line)
+
+        def flush(self) -> None:
+            # Flush any partial line that never got a newline
+            if self._buf.strip():
+                self._emit(self._buf)
+                self._buf = ""
+            try: sys.__stderr__.flush()
+            except Exception: pass
+            try: self._fh.flush()
+            except Exception: pass
+
+        def fileno(self) -> int:
+            return sys.__stderr__.fileno()
+
+    sys.stderr = _Tee()
+
+    # Session separator — visible even after many rotations
+    print(f"[startup] {'=' * 56}", file=sys.stderr)
+    print(f"[startup] Thomas Whisperer started  pid={os.getpid()}", file=sys.stderr)
+    print(f"[startup] {'=' * 56}", file=sys.stderr)
 
     def _excepthook(exc_type, exc_value, exc_tb):
         tb = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-        log_fh.write(f"\n[CRASH] {tb}\n")
-        log_fh.flush()
+        print(f"[CRASH] {tb}", file=sys.stderr)
         sys.__excepthook__(exc_type, exc_value, exc_tb)
 
     sys.excepthook = _excepthook
@@ -48,8 +108,7 @@ def _setup_logging() -> None:
     def _thread_excepthook(args):
         tb = "".join(traceback.format_exception(
             args.exc_type, args.exc_value, args.exc_traceback))
-        log_fh.write(f"\n[THREAD CRASH] thread={args.thread}\n{tb}\n")
-        log_fh.flush()
+        print(f"[THREAD CRASH] thread={args.thread}\n{tb}", file=sys.stderr)
 
     threading.excepthook = _thread_excepthook
 
