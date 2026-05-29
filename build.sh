@@ -127,7 +127,10 @@ if [ -d "dist/ThomasWhisperer.app" ]; then
     echo ""
 
     echo "=== Installing to /Applications ==="
-    cp -r dist/ThomasWhisperer.app /Applications/ThomasWhisperer.app
+    # Remove any existing install first — `cp -r src dest` nests src *inside* dest
+    # when dest already exists, producing /Applications/ThomasWhisperer.app/ThomasWhisperer.app.
+    rm -rf /Applications/ThomasWhisperer.app
+    cp -R dist/ThomasWhisperer.app /Applications/ThomasWhisperer.app
     xattr -dr com.apple.quarantine /Applications/ThomasWhisperer.app
     echo "  Installed — quarantine flag removed, Gatekeeper will not block it."
     echo ""

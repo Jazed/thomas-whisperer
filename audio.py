@@ -33,13 +33,29 @@ def _callback(indata: np.ndarray, frames: int, time, status) -> None:
 
 
 def _configured_device():
-    """Return the user-configured device (name/index), or None for system default."""
+    """Return the raw input_device config value, or None for system default.
+
+    May be None, a single device (name/index), or a prioritized list of devices
+    to try in order. Use _device_candidates() to get an ordered try-list."""
     try:
         from config import cfg
         v = getattr(cfg, "input_device", None)
         return v if v else None
     except Exception:
         return None
+
+
+def _device_candidates() -> list:
+    """Ordered list of devices to attempt, ending with None (system default) as the
+    final fallback so recording always works even if every named device is missing."""
+    v = _configured_device()
+    if v is None:
+        return [None]
+    candidates = list(v) if isinstance(v, (list, tuple)) else [v]
+    # Always end on the system default so a fully-missing chain still records.
+    if None not in candidates:
+        candidates.append(None)
+    return candidates
 
 
 def _default_input_name() -> str | None:
@@ -61,16 +77,38 @@ def _open_stream() -> None:
             pass
         _stream = None
 
-    device = _configured_device()
-    _stream = sd.InputStream(
-        device=device,
-        samplerate=SAMPLE_RATE,
-        channels=CHANNELS,
-        dtype=DTYPE,
-        callback=_callback,
-        blocksize=256,
-    )
-    _stream.start()
+    def _make_stream(dev):
+        s = sd.InputStream(
+            device=dev,
+            samplerate=SAMPLE_RATE,
+            channels=CHANNELS,
+            dtype=DTYPE,
+            callback=_callback,
+            blocksize=256,
+        )
+        s.start()
+        return s
+
+    # Walk the prioritized candidate list (e.g. MX Brio → MacBook mic → default),
+    # using the first device that actually opens. Ends on None (system default).
+    candidates = _device_candidates()
+    device = None
+    last_err = None
+    for i, cand in enumerate(candidates):
+        try:
+            _stream = _make_stream(cand)
+            device = cand
+            break
+        except Exception as e:
+            last_err = e
+            remaining = candidates[i + 1:]
+            tail = f" trying {remaining[0]!r} next." if remaining else ""
+            print(f"[audio] Input device {cand!r} unavailable ({e}).{tail}",
+                  file=sys.stderr)
+    else:
+        # Every candidate failed (including the system default) — give up.
+        raise last_err
+
     # Resolve which device we ended up on for change detection
     if device is None:
         _stream_device_name = _default_input_name()
@@ -97,6 +135,16 @@ def _is_likely_bluetooth(name: str) -> bool:
     """Return True if the device name looks like a Bluetooth/wireless device."""
     lower = (name or "").lower()
     return any(ind in lower for ind in ("airpods", "bluetooth", "headset", "wireless", "beats"))
+
+
+def _reinit_portaudio() -> None:
+    """Force PortAudio to rescan devices after a Bluetooth reconnect."""
+    try:
+        sd._terminate()
+        sd._initialize()
+        print("[audio] PortAudio reinitialized for device change.", file=sys.stderr)
+    except Exception as e:
+        print(f"[audio] PortAudio reinit failed: {e}", file=sys.stderr)
 
 
 def _duck_output_for_recording() -> None:
@@ -150,20 +198,37 @@ def _device_monitor() -> None:
     """Watch for device changes. When idle the stream is closed; only reopen if it
     dies mid-recording. Keeping the stream closed while idle lets AirPods stay in
     high-quality AAC mode instead of switching to HFP."""
-    global _stream_device_name
+    global _stream_device_name, _stream
     _time.sleep(4)
     while True:
         _time.sleep(2)
         try:
             current = _default_input_name() if _configured_device() is None else None
+            needs_reinit = False
             with _lock:
                 if _recording and (_stream is None or not _stream.active):
                     # Stream died mid-recording — recover immediately
                     print("[audio] Stream died during recording, reopening.", file=sys.stderr)
                     _open_stream()
                 elif not _recording and current:
-                    # Track the default device passively so start_recording() uses the right one
+                    if current != _stream_device_name:
+                        # Default input changed (e.g. AirPods reconnected) — close any
+                        # stale stream so the next recording opens on the right device.
+                        print(f"[audio] Default input changed: {_stream_device_name!r} → {current!r}",
+                              file=sys.stderr)
+                        if _stream is not None:
+                            try:
+                                _stream.stop()
+                                _stream.close()
+                            except Exception:
+                                pass
+                            _stream = None
+                        needs_reinit = True
                     _stream_device_name = current
+            if needs_reinit:
+                # Reinit outside the lock — forces PortAudio to rescan so device=None
+                # resolves to the newly connected device on the next recording.
+                _reinit_portaudio()
         except Exception as e:
             print(f"[audio] Device monitor error: {e}", file=sys.stderr)
 
@@ -206,8 +271,8 @@ def start_recording() -> None:
     with _lock:
         if _recording:
             return
-        if _stream is None:
-            _open_stream()  # only open if the idle-timeout already closed it
+        if _stream is None or not _stream.active:
+            _open_stream()  # reopen if closed by idle-timeout or killed by device disconnect
         _buffer.clear()
         _recording = True
     # osascript blocks 100-400 ms — unsafe to run on the CGEventTap callback thread
