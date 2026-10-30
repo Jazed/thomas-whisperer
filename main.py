@@ -113,30 +113,41 @@ def _setup_logging() -> None:
     threading.excepthook = _thread_excepthook
 
 
-def _kill_existing() -> None:
-    """Kill all other python processes running main.py, then write our PID."""
-    import subprocess
-    _PID_FILE.parent.mkdir(exist_ok=True)
-    my_pid = os.getpid()
+_LOCK_FILE = Path.home() / ".thomas-voice" / "app.lock"
+_lock_fh   = None   # held open for the lifetime of the process
 
-    # Find all other python processes running main.py
+
+def _take_over_instance() -> None:
+    """Single instance: the newest launch wins.
+
+    An exclusive flock on app.lock marks the running instance. If another process
+    holds it, we SIGTERM exactly that PID (read from app.pid) and wait for the lock.
+    Works for both `python main.py` and the frozen .app, and never touches
+    unrelated processes."""
+    import fcntl
+    global _lock_fh
+    _LOCK_FILE.parent.mkdir(exist_ok=True)
+    _lock_fh = open(_LOCK_FILE, "w")
     try:
-        result = subprocess.run(
-            ["pgrep", "-if", "python.*main\\.py"],  # -i: case-insensitive (macOS Python = capital P)
-            capture_output=True, text=True,
-        )
-        pids = [int(p) for p in result.stdout.split() if p.strip() and int(p) != my_pid]
-        for pid in pids:
+        fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            old_pid = int(_PID_FILE.read_text())
+            print(f"[startup] Replacing running instance pid={old_pid}", file=sys.stderr)
+            os.kill(old_pid, signal.SIGTERM)
+        except (ValueError, OSError):
+            pass
+        deadline = time.monotonic() + 5.0
+        while True:
             try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-        if pids:
-            time.sleep(1.0)
-    except Exception:
-        pass
-
-    _PID_FILE.write_text(str(my_pid))
+                fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    print("[startup] Another instance is still running — exiting.", file=sys.stderr)
+                    sys.exit(0)
+                time.sleep(0.1)
+    _PID_FILE.write_text(str(os.getpid()))
 
 
 def _cleanup_pid() -> None:
@@ -149,7 +160,7 @@ def _cleanup_pid() -> None:
 
 def main() -> None:
     _setup_logging()
-    _kill_existing()
+    _take_over_instance()
 
     import atexit
     atexit.register(_cleanup_pid)

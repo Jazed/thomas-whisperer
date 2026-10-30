@@ -55,40 +55,34 @@ fi
 source "$SCRIPT_DIR/venv/bin/activate"
 
 echo "=== Installing / updating dependencies ==="
-arch -arm64 "$PYTHON" -m pip install --upgrade pip -q
-arch -arm64 "$PYTHON" -m pip install pyinstaller faster-whisper sounddevice numpy \
-    pyobjc-core pyobjc-framework-Cocoa \
-    pyobjc-framework-Quartz pyobjc-framework-ApplicationServices \
-    mlx-whisper \
-    -q
+# Use the venv's interpreter — "$PYTHON" is the system Python and would install
+# packages outside the venv that PyInstaller bundles from.
+arch -arm64 "$VENV_PY" -m pip install --upgrade pip -q
+arch -arm64 "$VENV_PY" -m pip install pyinstaller -r requirements.txt -q
 
 echo "=== Preparing models ==="
 python - <<'PYEOF'
-import json, shutil, sys
+import shutil
 from pathlib import Path
+from huggingface_hub import snapshot_download
+import config
 
-cfg      = json.load(open("config.json"))
-provider = cfg.get("api_provider", "local")
-
-if provider == "mlx":
-    model = cfg.get("mlx_whisper_model", "mlx-community/whisper-large-v3-turbo")
-    from huggingface_hub import snapshot_download
-    cache = Path(snapshot_download(model))
-    print(f"  MLX model '{model}' ready ({sum(f.stat().st_size for f in cache.rglob('*') if f.is_file()) // 1_000_000} MB cached).")
-else:
-    lang_models = cfg.get("language_models") or {}
-    sizes = set(lang_models.values()) | {cfg.get("local_whisper_model", "base")}
-    for size in sizes:
-        dest = Path("models") / size
-        if dest.exists():
-            print(f"  '{size}' already bundled — skipping.")
-            continue
-        print(f"  Downloading '{size}' from HuggingFace…")
-        from huggingface_hub import snapshot_download
-        src = Path(snapshot_download(f"Systran/faster-whisper-{size}"))
+engine, repo = config.active_engine()
+print(f"  Profile '{config.machine_profile()}' → engine '{engine}' ({repo})")
+if engine == "faster_whisper":
+    dest = Path("models") / repo
+    if not dest.exists():
+        src = Path(snapshot_download(f"Systran/faster-whisper-{repo}"))
         dest.parent.mkdir(exist_ok=True)
         shutil.copytree(src, dest, symlinks=False)
-        print(f"  '{size}' bundled ({sum(f.stat().st_size for f in dest.rglob('*') if f.is_file()) // 1_000_000} MB).")
+    print(f"  '{repo}' bundled.")
+else:
+    # MLX models live in ~/.cache/huggingface and are loaded at runtime.
+    snapshot_download(repo)
+    print(f"  '{repo}' cached.")
+if config.cleanup_settings().get("enabled"):
+    snapshot_download(config.cleanup_settings()["model"])
+    print("  Cleanup model cached.")
 PYEOF
 
 echo "=== Generating icon ==="
@@ -100,42 +94,79 @@ rm -rf build dist
 echo "=== Building arm64 .app ==="
 arch -arm64 venv/bin/pyinstaller thomas-whisperer.spec --noconfirm 2>&1
 
-if [ -d "dist/ThomasWhisperer.app" ]; then
-    built_arch=$(file dist/ThomasWhisperer.app/Contents/MacOS/ThomasWhisperer 2>/dev/null \
-        | grep -oE 'universal binary|arm64|x86_64' | head -1 || echo "unknown")
-
-    # Flush Finder's icon cache so the new icon appears immediately.
-    touch dist/ThomasWhisperer.app
-    /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
-        -f dist/ThomasWhisperer.app 2>/dev/null || true
-
-    # Clear the stale Accessibility TCC entry so the new binary gets a clean prompt.
-    # The per-user TCC database doesn't need sudo.
-    echo "=== Resetting Accessibility permission for new binary ==="
-    if tccutil reset Accessibility ai.thomaswhisperer.app 2>/dev/null; then
-        echo "  Old Accessibility entry cleared — app will prompt once on next launch."
-    else
-        echo "  No previous Accessibility entry found (fresh install)."
-    fi
-
-    echo ""
-    echo "=== Build complete ==="
-    echo "  App:  dist/ThomasWhisperer.app"
-    echo "  Arch: $built_arch"
-    echo ""
-    echo "  To share:   zip -r ThomasWhisperer.zip dist/ThomasWhisperer.app"
-    echo ""
-
-    echo "=== Installing to /Applications ==="
-    # Remove any existing install first — `cp -r src dest` nests src *inside* dest
-    # when dest already exists, producing /Applications/ThomasWhisperer.app/ThomasWhisperer.app.
-    rm -rf /Applications/ThomasWhisperer.app
-    cp -R dist/ThomasWhisperer.app /Applications/ThomasWhisperer.app
-    xattr -dr com.apple.quarantine /Applications/ThomasWhisperer.app
-    echo "  Installed — quarantine flag removed, Gatekeeper will not block it."
-    echo ""
-    echo "  Grant Microphone + Accessibility when prompted on first launch."
-else
+APP="dist/ThomasWhisperer.app"
+if [ ! -d "$APP" ]; then
     echo "Build failed — check output above."
     exit 1
 fi
+built_arch=$(file "$APP/Contents/MacOS/ThomasWhisperer" 2>/dev/null \
+    | grep -oE 'universal binary|arm64|x86_64' | head -1 || echo "unknown")
+VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist")
+
+# ---------------------------------------------------------------------------
+# Sign. With the self-signed identity from ./signing.sh macOS remembers the
+# Microphone/Accessibility grants across rebuilds. Without it we fall back to
+# ad-hoc signing, which invalidates the grants on every build.
+# ---------------------------------------------------------------------------
+SIGN_IDENTITY="ThomasWhisperer Self-Signed"
+SIGN_KEYCHAIN="$HOME/Library/Keychains/thomaswhisperer-signing.keychain-db"
+if [ -f "$SIGN_KEYCHAIN" ]; then
+    echo "=== Signing with '$SIGN_IDENTITY' ==="
+    security unlock-keychain -p thomaswhisperer "$SIGN_KEYCHAIN"
+    codesign --force --deep --keychain "$SIGN_KEYCHAIN" --sign "$SIGN_IDENTITY" "$APP"
+    STABLE_SIGNATURE=true
+else
+    echo "=== Signing ad-hoc (run ./signing.sh once to keep permissions across builds) ==="
+    codesign --force --deep --sign - "$APP"
+    STABLE_SIGNATURE=false
+fi
+codesign --verify --deep "$APP" && echo "  Signature OK."
+
+# Flush Finder's icon cache so the new icon appears immediately.
+touch "$APP"
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister \
+    -f "$APP" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Package a DMG for other Macs (drag to Applications + install notes)
+# ---------------------------------------------------------------------------
+echo "=== Creating DMG ==="
+DMG="dist/ThomasWhisperer-$VERSION.dmg"
+STAGE=$(mktemp -d)
+cp -R "$APP" "$STAGE/"
+ln -s /Applications "$STAGE/Applications"
+cp INSTALL.txt "$STAGE/Lees mij - installeren.txt"
+rm -f "$DMG"
+hdiutil create -volname "ThomasWhisperer $VERSION" -srcfolder "$STAGE" \
+    -ov -format UDZO "$DMG" >/dev/null
+rm -rf "$STAGE"
+echo "  $DMG ($(du -h "$DMG" | cut -f1))"
+
+echo ""
+echo "=== Build complete ==="
+echo "  App:  $APP ($built_arch, v$VERSION)"
+echo "  DMG:  $DMG"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Install locally
+# ---------------------------------------------------------------------------
+echo "=== Installing to /Applications ==="
+# Quit the running copy first so the files aren't replaced underneath it.
+osascript -e 'tell application id "ai.thomaswhisperer.app" to quit' 2>/dev/null || true
+pkill -x ThomasWhisperer 2>/dev/null || true
+
+if ! $STABLE_SIGNATURE; then
+    # Ad-hoc: the old grant points at the previous binary hash — clear it so the
+    # new build gets a clean prompt instead of a silently broken hotkey.
+    tccutil reset Accessibility ai.thomaswhisperer.app >/dev/null 2>&1 || true
+fi
+
+# Remove any existing install first — `cp -R src dest` nests src *inside* dest
+# when dest already exists, producing /Applications/ThomasWhisperer.app/ThomasWhisperer.app.
+rm -rf /Applications/ThomasWhisperer.app
+cp -R "$APP" /Applications/ThomasWhisperer.app
+xattr -dr com.apple.quarantine /Applications/ThomasWhisperer.app
+echo "  Installed."
+open /Applications/ThomasWhisperer.app
+echo "  Launched. Check the menu bar icon → Microphone/Accessibility status."

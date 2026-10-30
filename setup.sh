@@ -31,7 +31,7 @@ echo "=== Verifying install ==="
 python3 -c "from AppKit import NSPanel; print('  PyObjC (AppKit): OK')"
 python3 -c "from Quartz import CGEventTapCreate; print('  PyObjC (Quartz): OK')"
 python3 -c "import sounddevice; print('  sounddevice: OK')"
-python3 -c "from faster_whisper import WhisperModel; print('  faster-whisper: OK')"
+python3 -c "import mlx_audio, mlx_lm; print('  mlx-audio + mlx-lm: OK')"
 
 echo ""
 echo "=== Permissions checklist ==="

@@ -1,0 +1,40 @@
+ThomasWhisperer installeren
+===========================
+
+Vereist: een Mac met Apple Silicon (M1 of nieuwer), macOS 14 of hoger.
+Ongeveer 3–5 GB vrije schijfruimte voor de spraak- en tekstmodellen.
+
+1. Sleep ThomasWhisperer naar de map Applications (in dit venster).
+
+2. De app is niet door Apple genotariseerd, dus macOS blokkeert de eerste
+   keer openen. Kies één van deze twee:
+
+   a) Open Terminal en plak:
+        xattr -dr com.apple.quarantine /Applications/ThomasWhisperer.app
+      Daarna gewoon openen vanuit Applications.
+
+   b) Of: open de app, klik "Gereed" bij de melding, ga naar
+      Systeeminstellingen → Privacy en beveiliging, scrol naar beneden
+      en klik "Toch openen" bij ThomasWhisperer.
+
+3. Bij de eerste start verschijnt het logo in de menubalk. Klik erop:
+   - "Microphone: missing — click to fix"   → zet ThomasWhisperer aan.
+   - "Accessibility: missing — click to fix" → zet ThomasWhisperer aan.
+   Staat er "granted" bij beide, dan ben je klaar.
+
+4. De eerste keer worden de modellen gedownload (1–3 GB). De overlay toont
+   "Loading model…" tot alles klaar is.
+
+5. Gebruik: houd Fn+Control ingedrukt en praat; loslaten = tekst plakken.
+   Control+Option = praten en vertalen (NL ↔ EN).
+
+Handig in het menu:
+   - Model        → kies een ander spraakmodel ("Auto" kiest het beste voor
+                    deze Mac op basis van het geheugen).
+   - Clean up text → laat een lokaal taalmodel interpunctie en "ehm" opschonen.
+   - Open at login → start automatisch bij het inloggen.
+
+Instellingen staan in ~/.thomas-voice/config.json (menu → Open config.json…).
+
+Updaten: nieuwe versie over de oude heen slepen. Werkt de sneltoets daarna
+niet meer, zet Accessibility in Systeeminstellingen uit en weer aan.

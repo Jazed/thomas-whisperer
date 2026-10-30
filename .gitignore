@@ -29,3 +29,6 @@ models/
 # Old spec
 thomas-voice.spec
 ThomasWhisperer.zip
+
+# Release packages
+*.dmg

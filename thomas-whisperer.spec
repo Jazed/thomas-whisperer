@@ -2,20 +2,27 @@
 import json
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 
 block_cipher = None
 
-# Bundle faster-whisper model dirs only when using the local provider.
+# Bundle faster-whisper model dirs only when that legacy engine is selected.
 # MLX models live in ~/.cache/huggingface and are loaded at runtime.
 _cfg = json.load(open('config.json'))
-_provider = _cfg.get('api_provider', 'local')
 _model_datas = [('config.json', '.')]
-if _provider == 'local':
-    _sizes = set((_cfg.get('language_models') or {}).values()) | {_cfg.get('local_whisper_model', 'base')}
-    for _m in _sizes:
-        _p = Path(f'models/{_m}')
-        if _p.exists():
-            _model_datas.append((str(_p), f'models/{_m}'))
+if _cfg.get('engine') == 'faster_whisper':
+    _size = (_cfg.get('engine_models') or {}).get('faster_whisper', 'small')
+    _p = Path(f'models/{_size}')
+    if _p.exists():
+        _model_datas.append((str(_p), f'models/{_size}'))
+
+# mlx-audio / mlx-lm import model code by name at runtime — collect it explicitly.
+_dynamic_imports = []
+for _pkg in ('mlx_audio.stt.models.parakeet', 'mlx_audio.stt.models.qwen3_asr',
+             'mlx_audio.stt.models.cohere_asr', 'mlx_audio.stt.models.voxtral_realtime',
+             'mlx_audio.stt.models.whisper', 'mlx_lm.models'):
+    _dynamic_imports += collect_submodules(_pkg)
+_model_datas += collect_data_files('mlx_audio') + collect_data_files('mlx_lm')
 
 a = Analysis(
     ['main.py'],
@@ -25,27 +32,34 @@ a = Analysis(
     hiddenimports=[
         # PyObjC
         'objc', 'AppKit', 'Foundation', 'Quartz', 'CoreFoundation',
-        'ApplicationServices', 'AVFoundation',
+        'ApplicationServices', 'AVFoundation', 'ServiceManagement',
         # faster-whisper internals
         'faster_whisper', 'ctranslate2', 'tokenizers', 'huggingface_hub',
         'av', 'tqdm',
-        # MLX Whisper
+        # MLX engines + local LLM
         'mlx', 'mlx.core', 'mlx.nn', 'mlx.utils',
         'mlx_whisper', 'mlx_whisper.audio', 'mlx_whisper.decoding',
         'mlx_whisper.load_models', 'mlx_whisper.transcribe', 'mlx_whisper.tokenizer',
+        'mlx_audio', 'mlx_audio.stt', 'mlx_audio.stt.utils',
+        'mlx_audio.stt.models.parakeet', 'mlx_audio.stt.models.qwen3_asr',
+        'mlx_audio.stt.models.cohere_asr', 'mlx_audio.stt.models.voxtral_realtime',
+        'mlx_lm', 'transformers',
         # Audio
         'sounddevice', 'soundfile', '_soundfile', 'cffi', '_cffi_backend',
         # APIs
-        'google.generativeai', 'google.ai.generativelanguage_v1beta',
-        'anthropic', 'openai',
+        'google.genai', 'openai',
         # Our modules
         'audio', 'transcribe', 'inject', 'overlay', 'hotkey',
-        'dictionary', 'history', 'config', 'app',
-    ],
+        'dictionary', 'history', 'config', 'app', 'cleanup',
+    ] + _dynamic_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['tkinter', 'PyQt5', 'PyQt6', 'wx', 'matplotlib'],
+    # torch/numba/librosa are pulled into the venv by mlx-audio extras but none of
+    # the engines we ship import them — excluding saves ~800 MB.
+    excludes=['tkinter', 'PyQt5', 'PyQt6', 'wx', 'matplotlib',
+              'torch', 'torchaudio', 'torchvision', 'numba', 'llvmlite', 'librosa',
+              'tensorflow', 'jax', 'sklearn', 'pandas'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
@@ -88,14 +102,15 @@ app = BUNDLE(
     name='ThomasWhisperer.app',
     icon='assets/icon.icns',
     bundle_identifier='ai.thomaswhisperer.app',
-    version='1.0.0',
+    version='2.0.0',
     info_plist={
         'CFBundleName': 'ThomasWhisperer',
         'CFBundleDisplayName': 'ThomasWhisperer',
-        'CFBundleShortVersionString': '1.0',
+        'CFBundleShortVersionString': '2.0.0',
         'NSMicrophoneUsageDescription': 'ThomasWhisperer records your voice for transcription.',
         'NSAccessibilityUsageDescription': 'ThomasWhisperer needs Accessibility access to paste transcribed text.',
         'LSUIElement': True,
+        'LSMinimumSystemVersion': '14.0',
         'NSHighResolutionCapable': True,
     },
 )
