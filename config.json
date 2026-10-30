@@ -1,31 +1,40 @@
 {
-  "api_provider": "mlx",
-  "local_whisper_model": "base",
-  "mlx_whisper_model": "mlx-community/whisper-large-v3-turbo",
+  "config_version": 2,
+  "api_provider": "local",
+  "profile": "auto",
+  "engine": "auto",
+  "engine_models": {},
+  "cleanup": {
+    "enabled": false,
+    "model": "auto"
+  },
+  "save_recordings": false,
   "gemini_api_key": "",
-  "gemini_model": "gemini-2.0-flash",
+  "gemini_model": "gemini-flash-latest",
   "openai_api_key": "",
-  "anthropic_api_key": "",
-  "post_process_with_claude": false,
   "hotkey": {
-    "modifiers": ["fn", "control"],
+    "modifiers": [
+      "fn",
+      "control"
+    ],
     "key": ""
   },
   "translate_hotkey": {
-    "modifiers": ["control", "option"],
+    "modifiers": [
+      "control",
+      "option"
+    ],
     "key": ""
   },
   "translation": {
-    "provider": "whisper",
-    "target_language": "en",
-    "model": "base"
+    "provider": "local",
+    "target_language": "auto"
   },
   "mode": "push_to_talk",
-  "language": ["nl", "en"],
-  "language_models": {
-    "nl": "small",
-    "en": "base"
-  },
+  "language": [
+    "nl",
+    "en"
+  ],
   "input_device": null,
   "mute_output_during_bluetooth_recording": true,
   "overlay_position": "bottom-center",

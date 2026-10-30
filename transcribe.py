@@ -1,273 +1,302 @@
 import io
-import base64
+import gc
 import sys
-from config import cfg
+import wave
+import threading
+import numpy as np
+from config import cfg, active_engine
 
-_models: dict = {}   # size_str → WhisperModel
+# Qwen3-ASR wants language names, the rest of the app uses ISO codes.
+_LANG_NAMES = {
+    "en": "English", "nl": "Dutch", "fr": "French", "de": "German",
+    "es": "Spanish", "it": "Italian", "pt": "Portuguese",
+    "pl": "Polish",  "sv": "Swedish", "da": "Danish", "fi": "Finnish",
+}
+_LANG_CODES = {v.lower(): k for k, v in _LANG_NAMES.items()}
+
+# Languages Whisper often confuses with Dutch for Dutch speakers
+_CLOSER_TO_NL = {"de", "af", "fy", "lb"}
+
+_lock   = threading.RLock()   # one engine in memory, one transcription at a time
+_active = None                # (engine_name, repo, model)
+_detector = None              # tiny Whisper used for language ID (Cohere only)
 
 
-def _model_path(size: str) -> str:
+# ---------------------------------------------------------------- helpers
+
+def _wav_to_float(audio_bytes: bytes) -> np.ndarray:
+    with wave.open(io.BytesIO(audio_bytes)) as wf:
+        pcm = wf.readframes(wf.getnframes())
+    return np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _allowed_langs() -> list | None:
+    lang = getattr(cfg, "language", None)
+    if isinstance(lang, str):
+        return [lang]
+    return list(lang) if lang else None
+
+
+def _resolve_lang(detected: str, allowed: list | None) -> str:
+    """Map a detected language onto the allowed list."""
+    if not allowed or detected in allowed:
+        return detected
+    if "nl" in allowed and detected in _CLOSER_TO_NL:
+        return "nl"
+    return allowed[0]
+
+
+def _vocabulary() -> list[str]:
+    """Words the model should prefer: dictionary targets + optional 'vocabulary' list."""
+    words = list((getattr(cfg, "dictionary", {}) or {}).values())
+    words += list(getattr(cfg, "vocabulary", []) or [])
+    return list(dict.fromkeys(w for w in words if w))
+
+
+def _whisper_detect(model, audio: np.ndarray, allowed: list | None) -> str:
+    """Language ID with an mlx_whisper model, restricted to the allowed languages."""
+    import mlx.core as mx
+    from mlx_whisper.audio import log_mel_spectrogram, pad_or_trim, N_FRAMES
+    mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels)
+    mel = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
+    _, probs = model.detect_language(mel)
+    if allowed:
+        return max(allowed, key=lambda l: probs.get(l, 0.0))
+    return max(probs, key=probs.get)
+
+
+def _free_memory() -> None:
+    gc.collect()
+    try:
+        import mlx.core as mx
+        mx.clear_cache()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------- engines
+
+def _load(engine: str, repo: str):
+    if engine == "faster_whisper":
+        from faster_whisper import WhisperModel
+        return WhisperModel(_faster_whisper_path(repo), device="auto", compute_type="int8")
+    if engine == "whisper":
+        # Load through mlx_whisper's own cache so transcribe() reuses this instance
+        # instead of holding a second copy in memory.
+        import mlx.core as mx
+        from mlx_whisper.transcribe import ModelHolder
+        return ModelHolder.get_model(repo, mx.float16)
+    from mlx_audio.stt.utils import load_model
+    # strict: a checkpoint whose weight names don't match must fail loudly —
+    # non-strict silently leaves layers random and the output is gibberish.
+    return load_model(repo, strict=True)
+
+
+def _faster_whisper_path(size: str) -> str:
     """Return bundled model path when frozen, otherwise fall back to HF download."""
     import os
     if getattr(sys, "frozen", False):
         bundled = os.path.join(sys._MEIPASS, "models", size)
         if os.path.isdir(bundled):
             return bundled
-    return size  # HuggingFace will download it
+    return size
 
 
-def _get_model(size: str):
-    if size not in _models:
-        from faster_whisper import WhisperModel
-        path = _model_path(size)
-        print(f"[transcribe] Loading Whisper '{size}'…", file=sys.stderr)
-        _models[size] = WhisperModel(path, device="auto", compute_type="int8")
-        print(f"[transcribe] Whisper '{size}' ready.", file=sys.stderr)
-    return _models[size]
+def _run(engine: str, repo: str, model, audio: np.ndarray) -> tuple[str, str]:
+    """Transcribe float32 16 kHz mono audio. Returns (text, language_code)."""
+    allowed = _allowed_langs()
+    vocab   = _vocabulary()
+
+    if engine == "parakeet":
+        import mlx.core as mx
+        out = model.generate(mx.array(audio))
+        return out.text.strip(), ""
+
+    if engine == "qwen3_asr":
+        lang = _LANG_NAMES.get(allowed[0]) if allowed and len(allowed) == 1 else None
+        out  = model.generate(audio, language=lang, hotwords=vocab or None)
+        detected = out.language[0] if isinstance(out.language, list) else out.language
+        detected = _LANG_CODES.get((detected or "").lower(), "")
+        if allowed and detected and detected not in allowed:
+            forced = _resolve_lang(detected, allowed)
+            print(f"[transcribe] qwen3 detected '{detected}', forcing '{forced}'", file=sys.stderr)
+            out = model.generate(audio, language=_LANG_NAMES.get(forced, forced),
+                                 hotwords=vocab or None)
+            detected = forced
+        return out.text.strip(), detected
+
+    if engine == "cohere":
+        # Cohere needs the language up front — detect it with a tiny Whisper.
+        lang = allowed[0] if allowed and len(allowed) == 1 else _detect_with_tiny(audio, allowed)
+        out  = model.generate(audio, language=lang)
+        return out.text.strip(), lang
+
+    if engine == "voxtral":
+        out = model.generate(audio)
+        return out.text.strip(), getattr(out, "language", "") or ""
+
+    if engine == "whisper":
+        import mlx_whisper
+        lang = allowed[0] if allowed and len(allowed) == 1 else _whisper_detect(model, audio, allowed)
+        result = mlx_whisper.transcribe(
+            audio, path_or_hf_repo=repo, language=lang,
+            initial_prompt=", ".join(vocab) or None,
+        )
+        return result.get("text", "").strip(), lang
+
+    if engine == "faster_whisper":
+        lang = allowed[0] if allowed and len(allowed) == 1 else None
+        if lang is None:
+            _, _, probs = model.detect_language(audio)
+            probs = dict(probs)
+            lang  = (max(allowed, key=lambda l: probs.get(l, 0.0)) if allowed
+                     else max(probs, key=probs.get))
+        segments, _ = model.transcribe(audio, beam_size=5, language=lang,
+                                       initial_prompt=", ".join(vocab) or None)
+        return " ".join(s.text for s in segments).strip(), lang
+
+    raise ValueError(f"Unknown engine '{engine}'")
 
 
-def _model_for(lang: str):
-    """Return the right model for a detected language."""
-    lang_models = getattr(cfg, "language_models", {}) or {}
-    size = lang_models.get(lang) or getattr(cfg, "local_whisper_model", "base")
-    return _get_model(size)
+def _detect_with_tiny(audio: np.ndarray, allowed: list | None) -> str:
+    global _detector
+    if _detector is None:
+        import mlx.core as mx
+        from mlx_whisper.load_models import load_model
+        _detector = load_model("mlx-community/whisper-tiny", dtype=mx.float16)
+    return _whisper_detect(_detector, audio, allowed)
 
 
-def _detect_model():
-    """Model used for language detection (always the base/smallest available)."""
-    lang_models = getattr(cfg, "language_models", {}) or {}
-    sizes = list(lang_models.values()) + [getattr(cfg, "local_whisper_model", "base")]
-    # Pick the smallest — sort by known order
-    order = ["tiny", "base", "small", "medium", "large-v2", "large-v3"]
-    best  = min(sizes, key=lambda s: order.index(s) if s in order else 99)
-    return _get_model(best)
+def _ensure_engine():
+    """Load the configured engine, unloading the previous one first."""
+    global _active, _detector
+    engine, repo = active_engine()
+    with _lock:
+        if _active and _active[:2] == (engine, repo):
+            return _active
+        if _active:
+            print(f"[transcribe] Unloading '{_active[0]}' ({_active[1]})…", file=sys.stderr)
+            if _active[0] == "whisper":
+                from mlx_whisper.transcribe import ModelHolder
+                ModelHolder.model = ModelHolder.model_path = None
+            _active = None
+            if engine != "cohere":
+                _detector = None
+            _free_memory()
+        print(f"[transcribe] Loading engine '{engine}' ({repo})…", file=sys.stderr)
+        model   = _load(engine, repo)
+        _active = (engine, repo, model)
+        print(f"[transcribe] Engine '{engine}' ready.", file=sys.stderr)
+        return _active
 
+
+def engine_loaded() -> bool:
+    """True when the configured engine is in memory (or none is needed)."""
+    if getattr(cfg, "api_provider", "local") not in ("local", "mlx"):
+        return True
+    return bool(_active) and _active[:2] == active_engine()
+
+
+# ---------------------------------------------------------------- public API
 
 def transcribe(audio_bytes: bytes) -> tuple[str, str]:
     """Returns (text, language_code)."""
     provider = getattr(cfg, "api_provider", "local")
 
-    if provider == "local":
-        return _transcribe_local(audio_bytes)
-    elif provider == "mlx":
-        return _transcribe_mlx(audio_bytes)
-    elif provider == "gemini":
+    if provider == "gemini":
         return _transcribe_gemini(audio_bytes), ""
-    elif provider == "openai":
+    if provider == "openai":
         return _transcribe_openai(audio_bytes), ""
-    elif provider == "claude":
-        text, lang = _transcribe_local(audio_bytes)
-        return _polish_with_claude(text), lang
-    else:
-        print(f"[transcribe] Unknown provider '{provider}', falling back to local", file=sys.stderr)
-        return _transcribe_local(audio_bytes)
+    if provider not in ("local", "mlx"):
+        print(f"[transcribe] Unknown provider '{provider}', using local engine", file=sys.stderr)
 
-
-def _transcribe_local(audio_bytes: bytes) -> tuple[str, str]:
-    """Returns (text, language_code)."""
-    import io as _io
-    cfg_lang    = getattr(cfg, "language", None)
-    lang_models = getattr(cfg, "language_models", {}) or {}
-
-    # Single explicit language, no per-language models → simple path
-    if isinstance(cfg_lang, str) and not lang_models:
-        buf = _io.BytesIO(audio_bytes)
-        segments, _ = _model_for(cfg_lang).transcribe(buf, beam_size=5, language=cfg_lang)
-        return " ".join(s.text for s in segments).strip(), cfg_lang
-
-    allowed = cfg_lang if isinstance(cfg_lang, list) and cfg_lang else None
-
-    # Step 1 — detect language using the smallest/fastest model
-    det_model = _detect_model()
-    det_buf   = _io.BytesIO(audio_bytes)
-    _, info   = det_model.transcribe(det_buf, beam_size=1, language=None,
-                                     without_timestamps=True)
-    detected  = info.language
-
-    # Step 2 — resolve to an allowed language
-    _CLOSER_TO_NL = {"de", "af", "fy", "lb"}
-    if allowed and detected not in allowed:
-        if "nl" in allowed and detected in _CLOSER_TO_NL:
-            detected = "nl"
-        else:
-            detected = allowed[0]
-        print(f"[transcribe] forced → '{detected}'", file=sys.stderr)
-    else:
-        print(f"[transcribe] detected '{detected}'", file=sys.stderr)
-
-    # Step 3 — transcribe with the model best suited for this language
-    model = _model_for(detected)
-    if model is det_model:
-        buf2 = _io.BytesIO(audio_bytes)
-        segments, _ = model.transcribe(buf2, beam_size=5, language=detected)
-    else:
-        buf = _io.BytesIO(audio_bytes)
-        segments, _ = model.transcribe(buf, beam_size=5, language=detected)
-
-    return " ".join(s.text for s in segments).strip(), detected
-
-
-def _transcribe_mlx(audio_bytes: bytes) -> tuple[str, str]:
-    """Transcribe using MLX Whisper — optimised for Apple Silicon Neural Engine."""
-    import os, tempfile
-    import mlx_whisper
-
-    cfg_lang = getattr(cfg, "language", None)
-    model    = getattr(cfg, "mlx_whisper_model", "mlx-community/whisper-large-v3-turbo")
-    allowed  = cfg_lang if isinstance(cfg_lang, list) and cfg_lang else None
-    lang     = cfg_lang if isinstance(cfg_lang, str) else None
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(audio_bytes)
-        tmp = f.name
-
-    try:
-        result   = mlx_whisper.transcribe(tmp, path_or_hf_repo=model, language=lang)
-        detected = result.get("language", lang or "en")
-        text     = result.get("text", "").strip()
-
-        _CLOSER_TO_NL = {"de", "af", "fy", "lb"}
-        if allowed and detected not in allowed:
-            if "nl" in allowed and detected in _CLOSER_TO_NL:
-                detected = "nl"
-            else:
-                detected = allowed[0]
-            print(f"[transcribe] mlx forced → '{detected}'", file=sys.stderr)
-            result   = mlx_whisper.transcribe(tmp, path_or_hf_repo=model, language=detected)
-            text     = result.get("text", "").strip()
-        else:
-            print(f"[transcribe] mlx detected '{detected}'", file=sys.stderr)
-    finally:
-        os.unlink(tmp)
-
-    return text, detected
+    with _lock:
+        engine, repo, model = _ensure_engine()
+        return _run(engine, repo, model, _wav_to_float(audio_bytes))
 
 
 def _transcribe_gemini(audio_bytes: bytes) -> str:
-    import google.generativeai as genai
-    genai.configure(api_key=cfg.gemini_api_key)
-    model = genai.GenerativeModel(getattr(cfg, "gemini_model", "gemini-2.0-flash"))
-    audio_b64 = base64.b64encode(audio_bytes).decode()
-    response = model.generate_content([
-        {"mime_type": "audio/wav", "data": audio_b64},
-        "Transcribe this audio verbatim. Return only the spoken text, no commentary or labels.",
-    ])
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=cfg.gemini_api_key)
+    response = client.models.generate_content(
+        model=getattr(cfg, "gemini_model", "gemini-flash-latest"),
+        contents=[
+            types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"),
+            "Transcribe this audio verbatim. Return only the spoken text, no commentary or labels.",
+        ],
+    )
     return response.text.strip()
 
 
 def _transcribe_openai(audio_bytes: bytes) -> str:
     from openai import OpenAI
     client = OpenAI(api_key=cfg.openai_api_key)
+    allowed = _allowed_langs()
     transcript = client.audio.transcriptions.create(
-        model="whisper-1",
+        model=getattr(cfg, "openai_model", "gpt-4o-transcribe"),
         file=("audio.wav", audio_bytes, "audio/wav"),
-        language=getattr(cfg, "language", "en"),
+        language=allowed[0] if allowed and len(allowed) == 1 else None,
     )
     return transcript.text.strip()
 
 
-def _polish_with_claude(text: str) -> str:
-    from anthropic import Anthropic
-    client = Anthropic(api_key=cfg.anthropic_api_key)
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": (
-                "Fix any transcription errors in the following voice dictation text. "
-                "Preserve developer terminology, code names, and proper nouns. "
-                "Fix obvious grammar and punctuation issues. "
-                "Return only the corrected text, nothing else.\n\n"
-                f"{text}"
-            ),
-        }],
-    )
-    return message.content[0].text.strip()
-
-
 def translate(audio_bytes: bytes) -> tuple[str, str]:
-    """Transcribe audio and translate to the configured target language.
+    """Transcribe audio and translate it.
     Returns (translated_text, source_language_code).
     """
     cfg_trans = getattr(cfg, "translation", {}) or {}
-    provider  = cfg_trans.get("provider", "whisper")
-    target    = cfg_trans.get("target_language", "en")
-
-    if provider == "whisper":
-        return _translate_whisper(audio_bytes)
-    else:
-        text, source_lang = _transcribe_local(audio_bytes)
-        return _translate_with_llm(text, source_lang, target, provider), source_lang
+    provider  = cfg_trans.get("provider", "local")
+    text, source_lang = transcribe(audio_bytes)
+    target = _translation_target(cfg_trans.get("target_language", "auto"), source_lang)
+    if not text or source_lang == target:
+        return text, source_lang
+    return _translate_with_llm(text, source_lang, target, provider), source_lang
 
 
-def _translate_whisper(audio_bytes: bytes) -> tuple[str, str]:
-    """Use Whisper's built-in translate task — always outputs English."""
-    import io as _io
-    cfg_trans  = getattr(cfg, "translation", {}) or {}
-    model_size = cfg_trans.get("model", getattr(cfg, "local_whisper_model", "base"))
-    model      = _get_model(model_size)
-    buf        = _io.BytesIO(audio_bytes)
-    segments, info = model.transcribe(buf, task="translate", beam_size=5)
-    return " ".join(s.text for s in segments).strip(), info.language
+def _translation_target(target: str, source_lang: str) -> str:
+    """'auto' flips between the configured languages (nl → en, en → nl)."""
+    if target != "auto":
+        return target
+    others = [l for l in (_allowed_langs() or ["nl", "en"]) if l != source_lang]
+    return others[0] if others else "en"
 
 
 def _translate_with_llm(text: str, source_lang: str,
                         target_lang: str, provider: str) -> str:
-    """Translate text via an LLM API — supports any language pair."""
-    _NAMES = {
-        "en": "English", "nl": "Dutch", "fr": "French", "de": "German",
-        "es": "Spanish", "it": "Italian", "pt": "Portuguese",
-        "pl": "Polish",  "sv": "Swedish", "da": "Danish", "fi": "Finnish",
-    }
-    src    = _NAMES.get(source_lang, source_lang)
-    tgt    = _NAMES.get(target_lang, target_lang)
+    """Translate text via the local LLM or a cloud API — supports any language pair."""
+    src    = _LANG_NAMES.get(source_lang, source_lang or "the source language")
+    tgt    = _LANG_NAMES.get(target_lang, target_lang)
     prompt = (f"Translate the following text from {src} to {tgt}. "
               f"Return only the translated text, nothing else:\n\n{text}")
 
-    if provider == "claude":
-        from anthropic import Anthropic
-        r = Anthropic(api_key=cfg.anthropic_api_key).messages.create(
-            model="claude-sonnet-4-6", max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}])
-        return r.content[0].text.strip()
+    if provider == "local":
+        import cleanup
+        return cleanup.complete(prompt, fallback=text)
 
     if provider == "openai":
         from openai import OpenAI
         r = OpenAI(api_key=cfg.openai_api_key).chat.completions.create(
-            model="gpt-4o-mini",
+            model=getattr(cfg, "openai_chat_model", "gpt-4.1-mini"),
             messages=[{"role": "user", "content": prompt}])
         return r.choices[0].message.content.strip()
 
     if provider == "gemini":
-        import google.generativeai as genai
-        genai.configure(api_key=cfg.gemini_api_key)
-        r = genai.GenerativeModel(
-            getattr(cfg, "gemini_model", "gemini-2.0-flash")
-        ).generate_content(prompt)
+        from google import genai
+        r = genai.Client(api_key=cfg.gemini_api_key).models.generate_content(
+            model=getattr(cfg, "gemini_model", "gemini-flash-latest"), contents=prompt)
         return r.text.strip()
 
     return text   # unknown provider — return original unchanged
 
 
 def warm_up() -> None:
-    provider = getattr(cfg, "api_provider", "local")
-    if provider == "mlx":
-        import mlx_whisper
-        model = getattr(cfg, "mlx_whisper_model", "mlx-community/whisper-large-v3-turbo")
-        print(f"[transcribe] Pre-loading MLX model '{model}'…", file=sys.stderr)
-        mlx_whisper.transcribe(
-            __import__("numpy").zeros(16000, dtype="float32"),
-            path_or_hf_repo=model,
-        )
-        print("[transcribe] MLX model ready.", file=sys.stderr)
+    if getattr(cfg, "api_provider", "local") not in ("local", "mlx"):
         return
-    if provider != "local":
-        return
-    lang_models = getattr(cfg, "language_models", {}) or {}
-    if lang_models:
-        for lang, size in lang_models.items():
-            print(f"[transcribe] Pre-loading model '{size}' for '{lang}'…", file=sys.stderr)
-            _get_model(size)
-    else:
-        _get_model(getattr(cfg, "local_whisper_model", "base"))
+    with _lock:
+        engine, repo, model = _ensure_engine()
+        # One silent pass compiles the kernels so the first real dictation is fast.
+        try:
+            _run(engine, repo, model, np.zeros(16000, dtype=np.float32))
+        except Exception as e:
+            print(f"[transcribe] warm-up pass failed (non-fatal): {e}", file=sys.stderr)

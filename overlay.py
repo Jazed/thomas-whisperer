@@ -209,6 +209,12 @@ class _PillView(NSView):
             self._draw_text("Translating…", _IDLE_FONT, pulse, right_x, (h - 13) / 2, w,
                             color=_col(0.75, 0.55, 1.0, pulse))  # purple — distinct from blue
 
+        elif state == "loading":
+            pulse = 0.55 + 0.45 * abs(math.sin(t * math.pi * 0.9))
+            self._draw_logo(logo_cx, mid_y, logo_r)
+            self._draw_text("Loading model…", _IDLE_FONT, pulse, right_x, (h - 13) / 2, w,
+                            color=_col(1.0, 0.75, 0.35, pulse))  # amber — not ready yet
+
         elif state == "success":
             self._draw_text("✓ Done", 13, 1.0, 0, (h - 15) / 2, w,
                             center=True, color=_col(0.2, 0.85, 0.4, 0.95))
