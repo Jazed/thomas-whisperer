@@ -21,6 +21,15 @@ _LOG_FILE = Path.home() / ".thomas-voice" / "app.log"
 _RECORDINGS_DIR = Path.home() / ".thomas-voice" / "recordings"
 _MAX_RECORDINGS = 50
 
+
+def _peak_dbfs(wav_bytes: bytes) -> float:
+    import io, wave
+    import numpy as np
+    with wave.open(io.BytesIO(wav_bytes)) as wf:
+        pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+    peak = int(np.abs(pcm.astype(np.int32)).max()) if pcm.size else 0
+    return 20 * np.log10(max(peak, 1) / 32768)
+
 # (config value, menu label) — "auto" picks the hardware profile's default
 _ENGINE_MENU = [
     ("auto",           "Auto (best for this Mac)"),
@@ -530,12 +539,17 @@ class AppController(NSObject):
         try:
             # Empty audio: mic failed or user held hotkey for <1 frame — silently return
             if not audio_bytes:
+                _log(f"Dictation {duration:.1f}s: no audio captured")
                 return
 
             self._save_recording(audio_bytes)
             text, lang = transcribe.transcribe(audio_bytes)
             text = cleanup.clean(text)
             text = dictionary.apply(text)
+            # One line per dictation: a peak near 0 means the mic delivered silence
+            # (usually a missing Microphone permission), empty text means the model heard nothing.
+            _log(f"Dictation {duration:.1f}s: peak {_peak_dbfs(audio_bytes):.0f} dBFS, "
+                 f"lang '{lang}', {len(text)} chars")
 
             if text.strip():
                 history.write(text, duration, getattr(cfg, "api_provider", "local"), lang)

@@ -337,15 +337,19 @@ def stop_recording() -> bytes:
     return flush_and_get()
 
 
-def _trim_silence(audio: np.ndarray, threshold_db: float = -40.0) -> np.ndarray:
-    threshold = 10 ** (threshold_db / 20.0) * 32768
+def _trim_silence(audio: np.ndarray, floor_db: float = -60.0) -> np.ndarray:
     chunk = SAMPLE_RATE // 10  # 100 ms steps
-    end   = len(audio)
-    while end > chunk:
-        rms = np.sqrt(np.mean(audio[end - chunk:end].astype(np.float32) ** 2))
-        if rms > threshold:
-            break
-        end -= chunk
+    n     = len(audio) // chunk
+    if n < 2:
+        return audio
+    rms = np.sqrt(np.mean(audio[:n * chunk].reshape(n, chunk).astype(np.float32) ** 2, axis=1))
+    # Relative to this recording's own noise floor: a fixed level cut off the end
+    # of sentences on quiet microphones, whose speech never crossed it.
+    threshold = max(np.percentile(rms, 10) * 2.5, 10 ** (floor_db / 20.0) * 32768)
+    end = n
+    while end > 1 and rms[end - 1] <= threshold:
+        end -= 1
+    end *= chunk
     # Keep 300 ms after the last detected speech — gives natural word endings room
     return audio[:min(end + SAMPLE_RATE * 3 // 10, len(audio))]
 
