@@ -113,7 +113,19 @@ SIGN_KEYCHAIN="$HOME/Library/Keychains/thomaswhisperer-signing.keychain-db"
 if [ -f "$SIGN_KEYCHAIN" ]; then
     echo "=== Signing with '$SIGN_IDENTITY' ==="
     security unlock-keychain -p thomaswhisperer "$SIGN_KEYCHAIN"
+    # codesign only finds identities in the keychain search list. Add the signing
+    # keychain for the duration of the signing step, then restore the original list.
+    ORIG_KEYCHAINS=()
+    while IFS= read -r kc; do
+        kc="${kc#"${kc%%[![:space:]]*}"}"; kc="${kc#\"}"; kc="${kc%\"}"
+        [ -n "$kc" ] && ORIG_KEYCHAINS+=("$kc")
+    done < <(security list-keychains -d user)
+    restore_keychains() { security list-keychains -d user -s "${ORIG_KEYCHAINS[@]}"; }
+    trap restore_keychains EXIT
+    security list-keychains -d user -s "${ORIG_KEYCHAINS[@]}" "$SIGN_KEYCHAIN"
     codesign --force --deep --keychain "$SIGN_KEYCHAIN" --sign "$SIGN_IDENTITY" "$APP"
+    restore_keychains
+    trap - EXIT
     STABLE_SIGNATURE=true
 else
     echo "=== Signing ad-hoc (run ./signing.sh once to keep permissions across builds) ==="
