@@ -152,21 +152,26 @@ class AppController(NSObject):
         if self._state == "idle":
             self._overlay.set_state("loading")
         try:
+            from config import active_engine, cleanup_settings
             # Loop: the user may pick another model while one is still loading.
+            # Stop once nothing changed during a pass — a model that fails to load
+            # is reported once, not retried forever.
             while True:
+                target = (active_engine(), cleanup_settings())
                 transcribe.warm_up()
                 cleanup.warm_up()
-                if transcribe.engine_loaded() and (not cleanup.enabled() or cleanup.loaded()):
+                if target == (active_engine(), cleanup_settings()):
                     break
+            _log("Models ready.")
         except Exception as e:
-            _log(f"warm_up error: {e}")
+            import traceback as _tb
+            _log(f"warm_up error: {e}\n{_tb.format_exc().strip()}")
             self._set_state_main("error")
             time.sleep(1.5)
         finally:
             self._libs_ready = True
             self._switching  = False
             self._set_state_main("idle_done")
-        _log("Models ready.")
 
     # ------------------------------------------------------------------ menu bar
 

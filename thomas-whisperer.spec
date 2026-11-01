@@ -16,18 +16,26 @@ if _cfg.get('engine') == 'faster_whisper':
     if _p.exists():
         _model_datas.append((str(_p), f'models/{_size}'))
 
-# mlx-audio / mlx-lm import model code by name at runtime — collect it explicitly.
+# mlx (from its C extension) and mlx-audio / mlx-lm (by model name) import modules
+# PyInstaller cannot see — collect them explicitly.
 _dynamic_imports = []
-for _pkg in ('mlx_audio.stt.models.parakeet', 'mlx_audio.stt.models.qwen3_asr',
+for _pkg in ('mlx', 'mlx_audio.stt.models.parakeet', 'mlx_audio.stt.models.qwen3_asr',
              'mlx_audio.stt.models.cohere_asr', 'mlx_audio.stt.models.voxtral_realtime',
-             'mlx_audio.stt.models.whisper', 'mlx_lm.models'):
+             'mlx_audio.stt.models.whisper', 'mlx_lm'):
     _dynamic_imports += collect_submodules(_pkg)
 _model_datas += collect_data_files('mlx_audio') + collect_data_files('mlx_lm')
+
+# PyInstaller only follows libmlx.dylib; libjaccl.dylib (linked via @rpath) and the
+# Metal kernels (mlx.metallib) must be shipped next to it by hand.
+import mlx
+_mlx_lib = Path(list(mlx.__path__)[0]) / 'lib'
+_mlx_binaries = [(str(f), 'mlx/lib') for f in _mlx_lib.glob('*.dylib')]
+_model_datas += [(str(f), 'mlx/lib') for f in _mlx_lib.glob('*.metallib')]
 
 a = Analysis(
     ['main.py'],
     pathex=[str(Path('.').resolve())],
-    binaries=[],
+    binaries=_mlx_binaries,
     datas=_model_datas,
     hiddenimports=[
         # PyObjC
