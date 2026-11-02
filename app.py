@@ -340,15 +340,15 @@ class AppController(NSObject):
 
     @objc.python_method
     def _refresh_model_menu(self):
-        from config import active_engine, cleanup_settings
+        from config import profile_engine, cleanup_settings
         chosen = getattr(cfg, "engine", "auto") or "auto"
         if chosen not in self._engine_items:
             chosen = "auto"
-        auto_engine = active_engine()[0] if chosen == "auto" else None
         for value, item in self._engine_items.items():
             label = dict(_ENGINE_MENU)[value]
             if value == "auto":
-                label = f"{label}: {dict(_ENGINE_MENU).get(active_engine()[0], '?').split(' —')[0]}"
+                # Name what auto picks on this Mac, regardless of the current choice.
+                label = f"{label}: {dict(_ENGINE_MENU).get(profile_engine(), '?').split(' —')[0]}"
             item.setTitle_(label)
             item.setState_(1 if value == chosen else 0)
         if self._cleanup_item:

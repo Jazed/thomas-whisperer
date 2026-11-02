@@ -15,4 +15,5 @@ mlx-lm>=0.32.0; sys_platform == "darwin" and platform_machine == "arm64"
 faster-whisper>=1.0.0
 # Optional cloud providers
 google-genai>=1.0.0
+truststore>=0.10
 openai>=1.35.0

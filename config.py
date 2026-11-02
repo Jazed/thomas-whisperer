@@ -96,7 +96,8 @@ PROFILES = {
         "cleanup_model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
     },
     "large": {
-        "engine": "qwen3_asr",
+        # Most accurate in both benchmarks; fast enough with the memory to spare.
+        "engine": "whisper",
         "engine_models": {"qwen3_asr": "mlx-community/Qwen3-ASR-1.7B-8bit"},
         "cleanup_model": "mlx-community/Qwen3-4B-Instruct-2507-4bit",
     },
@@ -116,13 +117,18 @@ def machine_profile() -> str:
     return "large" if mem >= 16 * 1024 ** 3 else "small"
 
 
+def profile_engine() -> str:
+    """The engine "auto" resolves to on this machine."""
+    return PROFILES[machine_profile()]["engine"]
+
+
 def active_engine() -> tuple[str, str]:
     """Return (engine_name, model_repo) after applying profile defaults.
     Explicit keys in the user config always win over the profile."""
     prof   = PROFILES[machine_profile()]
     engine = getattr(cfg, "engine", "auto")
     if engine in (None, "", "auto") or engine not in ENGINE_REPOS:
-        engine = prof["engine"]
+        engine = profile_engine()
     user_models = getattr(cfg, "engine_models", {}) or {}
     repo = (user_models.get(engine)
             or prof["engine_models"].get(engine)
