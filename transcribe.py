@@ -1,5 +1,6 @@
 import io
 import gc
+import re
 import sys
 import wave
 import threading
@@ -193,6 +194,9 @@ def _run(engine: str, repo: str, model, audio: np.ndarray) -> tuple[str, str]:
         result = mlx_whisper.transcribe(
             audio, path_or_hf_repo=repo, language=lang,
             initial_prompt=", ".join(vocab) or None,
+            # Feeding each 30 s window the previous text makes one bad window
+            # repeat itself for the rest of a long dictation.
+            condition_on_previous_text=False,
         )
         return result.get("text", "").strip(), lang
 
@@ -204,10 +208,25 @@ def _run(engine: str, repo: str, model, audio: np.ndarray) -> tuple[str, str]:
             lang  = (max(allowed, key=lambda l: probs.get(l, 0.0)) if allowed
                      else max(probs, key=probs.get))
         segments, _ = model.transcribe(audio, beam_size=5, language=lang,
-                                       initial_prompt=", ".join(vocab) or None)
+                                       initial_prompt=", ".join(vocab) or None,
+                                       condition_on_previous_text=False)
         return " ".join(s.text for s in segments).strip(), lang
 
     raise ValueError(f"Unknown engine '{engine}'")
+
+
+def _collapse_repeats(text: str) -> str:
+    """Drop the loops speech models fall into on long audio: the same sentence
+    back to back, or a phrase repeated three or more times in a row."""
+    out = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        prev = out[-1].strip().lower() if out else None
+        # Short ones ("Ja. Ja.") can be deliberate; only drop longer repeats.
+        if prev == sentence.strip().lower() and len(sentence.split()) >= 4:
+            continue
+        out.append(sentence)
+    text = " ".join(out)
+    return re.sub(r"\b((?:\S+\s+){2,11}?\S+)(?:\s+\1\b){2,}", r"\1", text, flags=re.IGNORECASE)
 
 
 def _detect_with_tiny(audio: np.ndarray, allowed: list | None) -> str:
@@ -289,7 +308,12 @@ def transcribe(audio_bytes: bytes) -> tuple[str, str]:
         # Whatever is loaded serves dictation — possibly a fallback while the chosen
         # model downloads. Switching happens in warm_up(), never mid-dictation.
         engine, repo, model = _active or _ensure_engine()
-        return _run(engine, repo, model, _wav_to_float(audio_bytes))
+        text, lang = _run(engine, repo, model, _wav_to_float(audio_bytes))
+    collapsed = _collapse_repeats(text)
+    if len(collapsed) < len(text):
+        print(f"[transcribe] Removed repeated text ({len(text)} → {len(collapsed)} chars)",
+              file=sys.stderr)
+    return collapsed, lang
 
 
 def _transcribe_gemini(audio_bytes: bytes) -> str:

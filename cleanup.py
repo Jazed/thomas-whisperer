@@ -91,6 +91,12 @@ def clean(text: str) -> str:
         return text
     if not loaded():
         return text   # still downloading/loading — don't hold the dictation up
+    # Generation grows with length: ~300 words takes 10-25 s even on fast Macs.
+    max_words = int(cleanup_settings().get("max_words") or 150)
+    if len(text.split()) > max_words:
+        print(f"[cleanup] Skipped: {len(text.split())} words > max_words {max_words}.",
+              file=sys.stderr)
+        return text
     import dictionary
     terms    = ", ".join(dictionary.terms()) or "(none)"
     # Generation time grows with length; scale the budget instead of a flat cap.

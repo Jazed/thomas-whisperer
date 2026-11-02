@@ -37,7 +37,7 @@ _ENGINE_MENU = [
     ("qwen3_asr",      "Qwen3-ASR — vocabulary-aware"),
     ("cohere",         "Cohere Transcribe — needs HF login"),
     ("whisper",        "Whisper large-v3-turbo"),
-    ("voxtral",        "Voxtral Realtime — 16 GB+"),
+    ("voxtral",        "Voxtral Realtime — experimental, 16 GB+"),
     ("faster_whisper", "faster-whisper (legacy)"),
 ]
 
@@ -654,13 +654,17 @@ class AppController(NSObject):
                 return
 
             self._save_recording(audio_bytes)
+            t0 = time.monotonic()
             text, lang = transcribe.transcribe(audio_bytes)
+            t1 = time.monotonic()
             text = cleanup.clean(text)
+            t2 = time.monotonic()
             text = dictionary.apply(text)
             # One line per dictation: a peak near 0 means the mic delivered silence
             # (usually a missing Microphone permission), empty text means the model heard nothing.
             _log(f"Dictation {duration:.1f}s: peak {_peak_dbfs(audio_bytes):.0f} dBFS, "
-                 f"lang '{lang}', {len(text)} chars")
+                 f"lang '{lang}', {len(text)} chars — "
+                 f"{transcribe.active_name()} {t1 - t0:.1f}s, cleanup {t2 - t1:.1f}s")
 
             if text.strip():
                 history.write(text, duration, getattr(cfg, "api_provider", "local"), lang)
