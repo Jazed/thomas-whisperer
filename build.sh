@@ -89,7 +89,11 @@ echo "=== Generating icon ==="
 python make_icon.py
 
 echo "=== Cleaning previous build ==="
-rm -rf build dist
+# Move aside before deleting: a Finder window on dist/ keeps rewriting .DS_Store,
+# which makes a plain rm -rf fail with "Directory not empty".
+OLD_BUILD=$(mktemp -d)
+for d in build dist; do [ -e "$d" ] && mv "$d" "$OLD_BUILD/"; done
+rm -rf "$OLD_BUILD" 2>/dev/null || true
 
 echo "=== Building arm64 .app ==="
 arch -arm64 venv/bin/pyinstaller thomas-whisperer.spec --noconfirm 2>&1
