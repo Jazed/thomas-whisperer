@@ -76,6 +76,7 @@ class AppController(NSObject):
         self._libs_ready       = False
         self._engine_items     = {}
         self._in_use_item      = None
+        self._words_menu       = None
         self._cleanup_item     = None
         self._switching        = False
         self._loading          = False   # a model download/load is running
@@ -265,6 +266,12 @@ class AppController(NSObject):
         self._cleanup_item.setTarget_(self)
         menu.addItem_(self._cleanup_item)
         self._refresh_model_menu()
+
+        words_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Words & names", None, "")
+        self._words_menu = NSMenu.alloc().init()
+        words_item.setSubmenu_(self._words_menu)
+        menu.addItem_(words_item)
+        self._refresh_words_menu()
         menu.addItem_(NSMenuItem.separatorItem())
 
         # Permissions — live status, click to open the right System Settings pane
@@ -301,6 +308,7 @@ class AppController(NSObject):
         # Permissions can change in System Settings at any time — refresh on open.
         self._refresh_permissions()
         self._refresh_model_menu()
+        self._refresh_words_menu()
 
     @objc.python_method
     def _refresh_permissions(self):
@@ -381,6 +389,72 @@ class AppController(NSObject):
             else:
                 text = f"In use: {name} — chosen model failed to load, see log"
             self._in_use_item.setTitle_(text)
+
+    @objc.python_method
+    def _refresh_words_menu(self):
+        """'Add…' plus one item per term; clicking a term offers to remove it."""
+        import dictionary
+        menu = self._words_menu
+        if menu is None:
+            return
+        menu.removeAllItems()
+        add = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Add word or name…", "addWord:", "")
+        add.setTarget_(self)
+        menu.addItem_(add)
+        entries = dictionary.entries()
+        if entries:
+            menu.addItem_(NSMenuItem.separatorItem())
+        for term, heard in entries:
+            title = f"{term}   ← {', '.join(heard)}" if heard else term
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "removeWord:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_(term)
+            item.setToolTip_("Click to remove")
+            menu.addItem_(item)
+
+    def addWord_(self, sender):
+        import dictionary
+        from AppKit import NSAlert, NSTextField, NSView, NSApp
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Add a word or name")
+        alert.setInformativeText_(
+            "Always written exactly like this, and kept as-is when translating.\n\n"
+            "If a model writes it wrong, add those versions too (comma-separated). "
+            "Parakeet ignores hints, so for Parakeet this is what fixes it.")
+        alert.addButtonWithTitle_("Add")
+        alert.addButtonWithTitle_("Cancel")
+        view  = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 58))
+        term  = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 32, 300, 24))
+        heard = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 300, 24))
+        term.setPlaceholderString_("Correct spelling, e.g. useEffect")
+        heard.setPlaceholderString_("Written wrong as (optional), e.g. use effect")
+        view.addSubview_(term)
+        view.addSubview_(heard)
+        alert.setAccessoryView_(view)
+        alert.window().setInitialFirstResponder_(term)
+        NSApp.activateIgnoringOtherApps_(True)   # menu-bar app: bring the dialog forward
+        if alert.runModal() != 1000:             # NSAlertFirstButtonReturn
+            return
+        dictionary.add(str(term.stringValue()), str(heard.stringValue()).split(","))
+        _log(f"Word added: {term.stringValue()!s}")
+        self._refresh_words_menu()
+
+    def removeWord_(self, sender):
+        import dictionary
+        from AppKit import NSAlert, NSApp
+        term  = str(sender.representedObject())
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(f"Remove “{term}”?")
+        alert.setInformativeText_("Its spelling fixes are removed too.")
+        alert.addButtonWithTitle_("Remove")
+        alert.addButtonWithTitle_("Cancel")
+        NSApp.activateIgnoringOtherApps_(True)
+        if alert.runModal() != 1000:
+            return
+        dictionary.remove(term)
+        _log(f"Word removed: {term}")
+        self._refresh_words_menu()
 
     def selectEngine_(self, sender):
         from config import save

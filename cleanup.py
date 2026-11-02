@@ -91,7 +91,8 @@ def clean(text: str) -> str:
         return text
     if not loaded():
         return text   # still downloading/loading — don't hold the dictation up
-    terms    = ", ".join((getattr(cfg, "dictionary", {}) or {}).values()) or "(none)"
+    import dictionary
+    terms    = ", ".join(dictionary.terms()) or "(none)"
     # Generation time grows with length; scale the budget instead of a flat cap.
     timeout  = float(cleanup_settings().get("timeout_s") or 2.5 + 0.08 * len(text.split()))
     messages = [{"role": "system", "content": _SYSTEM.format(terms=terms)}]

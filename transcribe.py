@@ -53,10 +53,9 @@ def _resolve_lang(detected: str, allowed: list | None) -> str:
 
 
 def _vocabulary() -> list[str]:
-    """Words the model should prefer: dictionary targets + optional 'vocabulary' list."""
-    words = list((getattr(cfg, "dictionary", {}) or {}).values())
-    words += list(getattr(cfg, "vocabulary", []) or [])
-    return list(dict.fromkeys(w for w in words if w))
+    """Words the model should prefer — the user's words & names list."""
+    import dictionary
+    return dictionary.terms()
 
 
 def _whisper_detect(model, audio: np.ndarray, allowed: list | None) -> str:
@@ -325,7 +324,10 @@ def translate(audio_bytes: bytes) -> tuple[str, str]:
     """
     cfg_trans = getattr(cfg, "translation", {}) or {}
     provider  = cfg_trans.get("provider", "local")
+    import dictionary
+    # Fix known mishearings first so the translator sees the right names.
     text, source_lang = transcribe(audio_bytes)
+    text   = dictionary.apply(text)
     target = _translation_target(cfg_trans.get("target_language", "auto"), source_lang)
     if not text or source_lang == target:
         return text, source_lang
@@ -345,8 +347,11 @@ def _translate_with_llm(text: str, source_lang: str,
     """Translate text via the local LLM or a cloud API — supports any language pair."""
     src    = _LANG_NAMES.get(source_lang, source_lang or "the source language")
     tgt    = _LANG_NAMES.get(target_lang, target_lang)
+    keep   = _vocabulary()
     prompt = (f"Translate the following text from {src} to {tgt}. "
-              f"Return only the translated text, nothing else:\n\n{text}")
+              + (f"Keep these names and terms exactly as written, never translate them: "
+                 f"{', '.join(keep)}. " if keep else "")
+              + f"Return only the translated text, nothing else:\n\n{text}")
 
     if provider == "local":
         import cleanup

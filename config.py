@@ -159,7 +159,7 @@ def save(updates: dict) -> None:
     data.update(updates)
     tmp = CONFIG_PATH.with_suffix(".json.tmp")
     with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(data, f, indent=2, ensure_ascii=False)
     tmp.replace(CONFIG_PATH)
 
 
