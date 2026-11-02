@@ -85,6 +85,11 @@ ENGINE_REPOS = {
     "faster_whisper": "small",
 }
 
+# Small Whisper bundled with the app so dictation works before (or without) any
+# download; build.sh copies it to models/FALLBACK_DIR.
+FALLBACK_REPO = "mlx-community/whisper-base-mlx"
+FALLBACK_DIR  = "fallback-whisper"
+
 # Hardware profiles — picked from RAM when "profile" is "auto".
 # small: M1 8 GB → one compact ASR model + a small cleanup LLM.
 # large: ≥16 GB (e.g. M5 24 GB) → bigger models, both kept resident.
@@ -122,18 +127,21 @@ def profile_engine() -> str:
     return PROFILES[machine_profile()]["engine"]
 
 
+def engine_repo(engine: str) -> str:
+    """Model repo for an engine: user config, then profile, then the default."""
+    user_models = getattr(cfg, "engine_models", {}) or {}
+    return (user_models.get(engine)
+            or PROFILES[machine_profile()]["engine_models"].get(engine)
+            or ENGINE_REPOS[engine])
+
+
 def active_engine() -> tuple[str, str]:
     """Return (engine_name, model_repo) after applying profile defaults.
     Explicit keys in the user config always win over the profile."""
-    prof   = PROFILES[machine_profile()]
     engine = getattr(cfg, "engine", "auto")
     if engine in (None, "", "auto") or engine not in ENGINE_REPOS:
         engine = profile_engine()
-    user_models = getattr(cfg, "engine_models", {}) or {}
-    repo = (user_models.get(engine)
-            or prof["engine_models"].get(engine)
-            or ENGINE_REPOS[engine])
-    return engine, repo
+    return engine, engine_repo(engine)
 
 
 def cleanup_settings() -> dict:

@@ -61,7 +61,7 @@ arch -arm64 "$VENV_PY" -m pip install --upgrade pip -q
 arch -arm64 "$VENV_PY" -m pip install pyinstaller -r requirements.txt -q
 
 echo "=== Preparing models ==="
-python - <<'PYEOF'
+arch -arm64 "$VENV_PY" - <<'PYEOF'
 import shutil
 from pathlib import Path
 from huggingface_hub import snapshot_download
@@ -83,6 +83,15 @@ else:
 if config.cleanup_settings().get("enabled"):
     snapshot_download(config.cleanup_settings()["model"])
     print("  Cleanup model cached.")
+
+# Small Whisper bundled in the app: dictation works before any download finishes.
+fallback = Path("models") / config.FALLBACK_DIR
+if not fallback.exists():
+    src = Path(snapshot_download(config.FALLBACK_REPO))
+    fallback.parent.mkdir(exist_ok=True)
+    shutil.copytree(src, fallback, symlinks=False,
+                    ignore=shutil.ignore_patterns(".gitattributes", "README.md"))
+print(f"  Fallback '{config.FALLBACK_REPO}' bundled.")
 PYEOF
 
 echo "=== Generating icon ==="

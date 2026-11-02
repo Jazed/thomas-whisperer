@@ -4,7 +4,7 @@ import sys
 import wave
 import threading
 import numpy as np
-from config import cfg, active_engine
+from config import cfg, active_engine, engine_repo, profile_engine, FALLBACK_REPO, FALLBACK_DIR
 
 # Qwen3-ASR wants language names, the rest of the app uses ISO codes.
 _LANG_NAMES = {
@@ -98,16 +98,51 @@ def _load(engine: str, repo: str):
     return load_model(repo, strict=True)
 
 
+def _patterns(engine: str) -> list | None:
+    """Files the engine's loader fetches — None means the whole repo."""
+    if engine in ("whisper", "faster_whisper"):
+        return None   # mlx_whisper downloads everything
+    from mlx_audio.utils import DEFAULT_ALLOW_PATTERNS
+    return DEFAULT_ALLOW_PATTERNS
+
+
+def _display_name(engine: str, repo: str) -> str:
+    if engine == "whisper" and (repo == FALLBACK_REPO or repo.endswith(FALLBACK_DIR)):
+        return "Whisper base"
+    return _DISPLAY_NAMES.get(engine, engine)
+
+
+def _is_cached(engine: str, repo: str) -> bool:
+    if engine == "faster_whisper":
+        return False   # fetched by faster-whisper itself; never a fallback
+    import downloads
+    return downloads.is_cached(repo, _patterns(engine))
+
+
 def _download(engine: str, repo: str) -> None:
     """Fetch the files the engine's loader will ask for, with progress."""
-    import downloads
     if engine == "faster_whisper":
         return   # bundled or fetched by faster-whisper itself
-    if engine == "whisper":
-        patterns = None   # mlx_whisper downloads the whole repo
-    else:
-        from mlx_audio.utils import DEFAULT_ALLOW_PATTERNS as patterns
-    downloads.ensure(repo, _DISPLAY_NAMES.get(engine, engine), patterns)
+    import downloads
+    downloads.ensure(repo, _display_name(engine, repo), _patterns(engine))
+
+
+def _fallback_engine(target: tuple) -> tuple | None:
+    """A model that can be used right now, without downloading: the best one
+    already on this Mac, else the small Whisper bundled with the app."""
+    import os
+    order = [profile_engine(), "parakeet", "whisper", "qwen3_asr", "voxtral", "cohere"]
+    for engine in dict.fromkeys(order):
+        repo = engine_repo(engine)
+        if (engine, repo) != target and _is_cached(engine, repo):
+            return engine, repo
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(sys._MEIPASS, "models", FALLBACK_DIR)
+        if os.path.isdir(bundled):
+            return "whisper", bundled
+    if _is_cached("whisper", FALLBACK_REPO):
+        return "whisper", FALLBACK_REPO
+    return None
 
 
 def _faster_whisper_path(size: str) -> str:
@@ -185,10 +220,10 @@ def _detect_with_tiny(audio: np.ndarray, allowed: list | None) -> str:
     return _whisper_detect(_detector, audio, allowed)
 
 
-def _ensure_engine():
-    """Load the configured engine, unloading the previous one first."""
+def _activate(engine: str, repo: str):
+    """Swap the engine in memory: unload the previous one first (8 GB Macs can't
+    hold two). The files must already be on disk — dictation waits only for this."""
     global _active, _detector
-    engine, repo = active_engine()
     with _lock:
         if _active and _active[:2] == (engine, repo):
             return _active
@@ -202,14 +237,21 @@ def _ensure_engine():
                 _detector = None
             _free_memory()
         import downloads
-        name = _DISPLAY_NAMES.get(engine, engine)
-        _download(engine, repo)
         print(f"[transcribe] Loading engine '{engine}' ({repo})…", file=sys.stderr)
-        downloads.report(f"Loading {name}…")
+        downloads.report(f"Loading {_display_name(engine, repo)}…")
         model   = _load(engine, repo)
         _active = (engine, repo, model)
         print(f"[transcribe] Engine '{engine}' ready.", file=sys.stderr)
         return _active
+
+
+def _ensure_engine():
+    """Download (if needed) and load the configured engine."""
+    target = active_engine()
+    if _active and _active[:2] == target:
+        return _active
+    _download(*target)
+    return _activate(*target)
 
 
 def engine_loaded() -> bool:
@@ -217,6 +259,18 @@ def engine_loaded() -> bool:
     if getattr(cfg, "api_provider", "local") not in ("local", "mlx"):
         return True
     return bool(_active) and _active[:2] == active_engine()
+
+
+def active_name() -> str | None:
+    """Display name of the engine that is in memory right now."""
+    return _display_name(*_active[:2]) if _active else None
+
+
+def usable() -> bool:
+    """True when some engine (maybe a fallback) can transcribe right now."""
+    if getattr(cfg, "api_provider", "local") not in ("local", "mlx"):
+        return True
+    return _active is not None
 
 
 # ---------------------------------------------------------------- public API
@@ -233,7 +287,9 @@ def transcribe(audio_bytes: bytes) -> tuple[str, str]:
         print(f"[transcribe] Unknown provider '{provider}', using local engine", file=sys.stderr)
 
     with _lock:
-        engine, repo, model = _ensure_engine()
+        # Whatever is loaded serves dictation — possibly a fallback while the chosen
+        # model downloads. Switching happens in warm_up(), never mid-dictation.
+        engine, repo, model = _active or _ensure_engine()
         return _run(engine, repo, model, _wav_to_float(audio_bytes))
 
 
@@ -312,15 +368,32 @@ def _translate_with_llm(text: str, source_lang: str,
     return text   # unknown provider — return original unchanged
 
 
-def warm_up() -> None:
-    if getattr(cfg, "api_provider", "local") not in ("local", "mlx"):
-        return
+def _warm(engine: str, repo: str, model) -> None:
+    """One silent pass compiles the kernels so the first real dictation is fast."""
+    import downloads
+    downloads.report(f"Warming up {_display_name(engine, repo)}…")
     with _lock:
-        engine, repo, model = _ensure_engine()
-        # One silent pass compiles the kernels so the first real dictation is fast.
-        import downloads
-        downloads.report(f"Warming up {_DISPLAY_NAMES.get(engine, engine)}…")
         try:
             _run(engine, repo, model, np.zeros(16000, dtype=np.float32))
         except Exception as e:
             print(f"[transcribe] warm-up pass failed (non-fatal): {e}", file=sys.stderr)
+
+
+def warm_up(on_usable=None) -> None:
+    """Get the configured engine loaded. If it must be downloaded first, keep the
+    current engine serving dictation meanwhile — or load a fallback when nothing
+    is loaded yet — and call on_usable() as soon as dictation works."""
+    if getattr(cfg, "api_provider", "local") not in ("local", "mlx"):
+        return
+    target = active_engine()
+    if not (_active and _active[:2] == target) and not _is_cached(*target):
+        if _active is None:
+            fallback = _fallback_engine(target)
+            if fallback:
+                print(f"[transcribe] '{target[0]}' needs a download — using "
+                      f"'{fallback[0]}' ({fallback[1]}) meanwhile.", file=sys.stderr)
+                _warm(*_activate(*fallback))
+        if _active is not None and on_usable:
+            on_usable()
+        _download(*target)   # outside the lock: the current engine keeps working
+    _warm(*_activate(*target))

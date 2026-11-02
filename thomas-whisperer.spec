@@ -10,6 +10,9 @@ block_cipher = None
 # MLX models live in ~/.cache/huggingface and are loaded at runtime.
 _cfg = json.load(open('config.json'))
 _model_datas = [('config.json', '.')]
+# Small Whisper so dictation works before any model download (config.FALLBACK_DIR).
+if Path('models/fallback-whisper').exists():
+    _model_datas.append(('models/fallback-whisper', 'models/fallback-whisper'))
 if _cfg.get('engine') == 'faster_whisper':
     _size = (_cfg.get('engine_models') or {}).get('faster_whisper', 'small')
     _p = Path(f'models/{_size}')

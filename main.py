@@ -18,6 +18,10 @@ try:
 except Exception as e:
     print(f"[startup] truststore unavailable, using certifi: {e}", file=sys.stderr)
 
+# The hub's progress bars write a line every few seconds into app.log;
+# downloads.py reports progress to the overlay and logs every 10% instead.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
 import AppKit
 from app import AppController
 

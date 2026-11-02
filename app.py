@@ -75,8 +75,10 @@ class AppController(NSObject):
         self._toggle_item      = None
         self._libs_ready       = False
         self._engine_items     = {}
+        self._in_use_item      = None
         self._cleanup_item     = None
         self._switching        = False
+        self._loading          = False   # a model download/load is running
         self._perm_items       = {}
         self._login_item       = None
         return self
@@ -158,6 +160,7 @@ class AppController(NSObject):
         until this finishes so a dictation never hits a half-loaded model."""
         import transcribe, cleanup, downloads
         self._libs_ready = False
+        self._loading    = True
         downloads.listener = self._overlay.set_status
         self._overlay.set_status(None)
         if self._state == "idle":
@@ -169,7 +172,8 @@ class AppController(NSObject):
             # is reported once, not retried forever.
             while True:
                 target = (active_engine(), cleanup_settings())
-                transcribe.warm_up()
+                transcribe.warm_up(on_usable=lambda: _log(
+                    "Dictation available on the current model while the new one loads."))
                 cleanup.warm_up()
                 if target == (active_engine(), cleanup_settings()):
                     break
@@ -182,6 +186,7 @@ class AppController(NSObject):
         finally:
             self._libs_ready = True
             self._switching  = False
+            self._loading    = False
             self._overlay.set_status(None)
             self._set_state_main("idle_done")
 
@@ -239,6 +244,12 @@ class AppController(NSObject):
 
         model_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Model", None, "")
         model_menu = NSMenu.alloc().init()
+        # What actually transcribes — can differ from the checkmark while a chosen
+        # model downloads, or when its download failed and a fallback stayed loaded.
+        self._in_use_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
+        self._in_use_item.setEnabled_(False)
+        model_menu.addItem_(self._in_use_item)
+        model_menu.addItem_(NSMenuItem.separatorItem())
         for value, label in _ENGINE_MENU:
             item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, "selectEngine:", "")
             item.setTarget_(self)
@@ -356,6 +367,20 @@ class AppController(NSObject):
             item.setState_(1 if value == chosen else 0)
         if self._cleanup_item:
             self._cleanup_item.setState_(1 if cleanup_settings().get("enabled") else 0)
+        if self._in_use_item:
+            transcribe = sys.modules.get("transcribe")
+            name = transcribe.active_name() if transcribe else None
+            if getattr(cfg, "api_provider", "local") not in ("local", "mlx"):
+                text = f"In use: {cfg.api_provider} (cloud)"
+            elif name is None:
+                text = "In use: none yet — loading…"
+            elif transcribe.engine_loaded():
+                text = f"In use: {name}"
+            elif self._loading:
+                text = f"In use: {name} (until the chosen model has loaded)"
+            else:
+                text = f"In use: {name} — chosen model failed to load, see log"
+            self._in_use_item.setTitle_(text)
 
     def selectEngine_(self, sender):
         from config import save
@@ -428,8 +453,17 @@ class AppController(NSObject):
     # ------------------------------------------------------------------ hotkey
 
     @objc.python_method
+    def _can_dictate(self) -> bool:
+        """Any loaded engine will do — a fallback, or the previous engine while a
+        newly chosen one downloads. Runs on the event-tap thread: no imports here."""
+        if self._libs_ready:
+            return True
+        transcribe = sys.modules.get("transcribe")
+        return bool(transcribe and transcribe.usable())
+
+    @objc.python_method
     def _on_hotkey_press(self) -> None:
-        if self._state != "idle" or not self._libs_ready:
+        if self._state != "idle" or not self._can_dictate():
             return
         import audio
         try:
@@ -468,7 +502,7 @@ class AppController(NSObject):
 
     @objc.python_method
     def _on_translate_press(self) -> None:
-        if self._state != "idle" or not self._libs_ready:
+        if self._state != "idle" or not self._can_dictate():
             return
         import audio
         try:
@@ -575,7 +609,8 @@ class AppController(NSObject):
                 self._refresh_model_menu()
             elif state == "idle_done":
                 self._state = "idle"
-                self._overlay.set_state("idle")
+                # A dictation on the fallback model ends while the real one still loads.
+                self._overlay.set_state("loading" if self._loading else "idle")
 
         from Foundation import NSThread
         if NSThread.isMainThread():
