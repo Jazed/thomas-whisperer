@@ -23,7 +23,8 @@ for _pkg in ('mlx', 'mlx_audio.stt.models.parakeet', 'mlx_audio.stt.models.qwen3
              'mlx_audio.stt.models.cohere_asr', 'mlx_audio.stt.models.voxtral_realtime',
              'mlx_audio.stt.models.whisper', 'mlx_lm'):
     _dynamic_imports += collect_submodules(_pkg)
-_model_datas += collect_data_files('mlx_audio') + collect_data_files('mlx_lm')
+_model_datas += (collect_data_files('mlx_audio') + collect_data_files('mlx_lm')
+                 + collect_data_files('mlx_whisper'))
 
 # PyInstaller only follows libmlx.dylib; libjaccl.dylib (linked via @rpath) and the
 # Metal kernels (mlx.metallib) must be shipped next to it by hand.
@@ -63,10 +64,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # torch/numba/librosa are pulled into the venv by mlx-audio extras but none of
-    # the engines we ship import them — excluding saves ~800 MB.
+    # torch/librosa are pulled into the venv by mlx-audio extras but none of the
+    # engines we ship import them — excluding saves ~700 MB. numba must stay:
+    # mlx_whisper imports it unconditionally.
     excludes=['tkinter', 'PyQt5', 'PyQt6', 'wx', 'matplotlib',
-              'torch', 'torchaudio', 'torchvision', 'numba', 'llvmlite', 'librosa',
+              'torch', 'torchaudio', 'torchvision', 'librosa',
               'tensorflow', 'jax', 'sklearn', 'pandas'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

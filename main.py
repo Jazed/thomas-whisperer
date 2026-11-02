@@ -7,6 +7,14 @@ import multiprocessing
 import time
 from datetime import datetime
 from pathlib import Path
+
+# A frozen app has no system CA bundle to fall back on: point SSL at the bundled
+# certifi file, or model downloads fail with CERTIFICATE_VERIFY_FAILED on Macs
+# without a python.org Python install.
+if getattr(sys, "frozen", False):
+    import certifi
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
 import AppKit
 from app import AppController
 
