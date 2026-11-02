@@ -112,7 +112,11 @@ SIGN_IDENTITY="ThomasWhisperer Self-Signed"
 SIGN_KEYCHAIN="$HOME/Library/Keychains/thomaswhisperer-signing.keychain-db"
 if [ -f "$SIGN_KEYCHAIN" ]; then
     echo "=== Signing with '$SIGN_IDENTITY' ==="
-    security unlock-keychain -p thomaswhisperer "$SIGN_KEYCHAIN"
+    # Prompts for the password chosen in ./signing.sh (no-op while still unlocked).
+    if ! security unlock-keychain "$SIGN_KEYCHAIN"; then
+        echo "ERROR: could not unlock $SIGN_KEYCHAIN — run ./build.sh in a terminal." >&2
+        exit 1
+    fi
     # codesign only finds identities in the keychain search list. Add the signing
     # keychain for the duration of the signing step, then restore the original list.
     ORIG_KEYCHAINS=()

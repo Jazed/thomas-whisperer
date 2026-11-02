@@ -8,15 +8,14 @@
 # Signing with the same certificate every time gives the app a stable identity,
 # so permissions survive rebuilds and updates. No Apple account needed.
 #
-# The certificate lives in its own keychain with a fixed password, so codesign can
-# use it without a GUI "allow access" prompt and builds run unattended. It only
-# holds this self-signed certificate, which grants nothing beyond signing this app.
-# build.sh picks it up automatically once it exists.
+# The certificate lives in its own keychain, protected by a password you choose
+# here (never stored). Whoever can sign with it inherits the app's Microphone and
+# Accessibility grants, so the keychain locks itself after 10 minutes and on sleep;
+# build.sh asks for the password when it signs. It only holds this certificate.
 set -e
 
 SIGN_IDENTITY="ThomasWhisperer Self-Signed"
 SIGN_KEYCHAIN="$HOME/Library/Keychains/thomaswhisperer-signing.keychain-db"
-SIGN_KEYCHAIN_PW="thomaswhisperer"
 
 if [ -f "$SIGN_KEYCHAIN" ] && security find-certificate -c "$SIGN_IDENTITY" "$SIGN_KEYCHAIN" >/dev/null 2>&1; then
     echo "Signing identity already set up in $SIGN_KEYCHAIN"
@@ -24,6 +23,11 @@ if [ -f "$SIGN_KEYCHAIN" ] && security find-certificate -c "$SIGN_IDENTITY" "$SI
 fi
 
 echo "=== Creating self-signed code-signing certificate '$SIGN_IDENTITY' ==="
+read -r -s -p "Choose a password for the signing keychain: " SIGN_KEYCHAIN_PW; echo
+read -r -s -p "Repeat it: " _PW2; echo
+if [ -z "$SIGN_KEYCHAIN_PW" ] || [ "$SIGN_KEYCHAIN_PW" != "$_PW2" ]; then
+    echo "Passwords empty or different — aborted."; exit 1
+fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -48,7 +52,7 @@ EOF
 
 rm -f "$SIGN_KEYCHAIN"
 security create-keychain -p "$SIGN_KEYCHAIN_PW" "$SIGN_KEYCHAIN"
-security set-keychain-settings "$SIGN_KEYCHAIN"          # no auto-lock timeout
+security set-keychain-settings -l -u -t 600 "$SIGN_KEYCHAIN"   # lock on sleep / after 10 min
 security unlock-keychain -p "$SIGN_KEYCHAIN_PW" "$SIGN_KEYCHAIN"
 security import "$TMP/id.p12" -k "$SIGN_KEYCHAIN" -P "$SIGN_KEYCHAIN_PW" \
     -T /usr/bin/codesign >/dev/null
