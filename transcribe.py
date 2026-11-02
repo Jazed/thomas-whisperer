@@ -17,6 +17,12 @@ _LANG_CODES = {v.lower(): k for k, v in _LANG_NAMES.items()}
 # Languages Whisper often confuses with Dutch for Dutch speakers
 _CLOSER_TO_NL = {"de", "af", "fy", "lb"}
 
+# Names shown in the overlay while a model downloads or loads
+_DISPLAY_NAMES = {
+    "parakeet": "Parakeet", "qwen3_asr": "Qwen3-ASR", "cohere": "Cohere",
+    "voxtral": "Voxtral", "whisper": "Whisper", "faster_whisper": "faster-whisper",
+}
+
 _lock   = threading.RLock()   # one engine in memory, one transcription at a time
 _active = None                # (engine_name, repo, model)
 _detector = None              # tiny Whisper used for language ID (Cohere only)
@@ -90,6 +96,18 @@ def _load(engine: str, repo: str):
     # strict: a checkpoint whose weight names don't match must fail loudly —
     # non-strict silently leaves layers random and the output is gibberish.
     return load_model(repo, strict=True)
+
+
+def _download(engine: str, repo: str) -> None:
+    """Fetch the files the engine's loader will ask for, with progress."""
+    import downloads
+    if engine == "faster_whisper":
+        return   # bundled or fetched by faster-whisper itself
+    if engine == "whisper":
+        patterns = None   # mlx_whisper downloads the whole repo
+    else:
+        from mlx_audio.utils import DEFAULT_ALLOW_PATTERNS as patterns
+    downloads.ensure(repo, _DISPLAY_NAMES.get(engine, engine), patterns)
 
 
 def _faster_whisper_path(size: str) -> str:
@@ -183,7 +201,11 @@ def _ensure_engine():
             if engine != "cohere":
                 _detector = None
             _free_memory()
+        import downloads
+        name = _DISPLAY_NAMES.get(engine, engine)
+        _download(engine, repo)
         print(f"[transcribe] Loading engine '{engine}' ({repo})…", file=sys.stderr)
+        downloads.report(f"Loading {name}…")
         model   = _load(engine, repo)
         _active = (engine, repo, model)
         print(f"[transcribe] Engine '{engine}' ready.", file=sys.stderr)
@@ -296,6 +318,8 @@ def warm_up() -> None:
     with _lock:
         engine, repo, model = _ensure_engine()
         # One silent pass compiles the kernels so the first real dictation is fast.
+        import downloads
+        downloads.report(f"Warming up {_DISPLAY_NAMES.get(engine, engine)}…")
         try:
             _run(engine, repo, model, np.zeros(16000, dtype=np.float32))
         except Exception as e:

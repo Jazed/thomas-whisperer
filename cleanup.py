@@ -25,9 +25,13 @@ def _ensure(repo: str):
     global _loaded
     if _loaded and _loaded[0] == repo:
         return _loaded
+    import downloads
     from mlx_lm import load
+    from mlx_lm.utils import DEFAULT_ALLOW_PATTERNS
     _loaded = None
+    downloads.ensure(repo, "cleanup model", DEFAULT_ALLOW_PATTERNS)
     print(f"[cleanup] Loading '{repo}'…", file=sys.stderr)
+    downloads.report("Loading cleanup model…")
     model, tokenizer = load(repo)
     _loaded = (repo, model, tokenizer)
     print("[cleanup] Ready.", file=sys.stderr)

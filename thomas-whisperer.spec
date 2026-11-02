@@ -59,7 +59,7 @@ a = Analysis(
         'google.genai', 'openai',
         # Our modules
         'audio', 'transcribe', 'inject', 'overlay', 'hotkey',
-        'dictionary', 'history', 'config', 'app', 'cleanup', 'truststore',
+        'dictionary', 'history', 'config', 'app', 'cleanup', 'downloads', 'truststore',
     ] + _dynamic_imports,
     hookspath=[],
     hooksconfig={},

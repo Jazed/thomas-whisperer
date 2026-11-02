@@ -101,6 +101,8 @@ class _PillView(NSView):
         self._down_pos   = None
         self._down_time  = 0.0
         self._opacity    = _load_opacity()
+        self._status     = None   # loading text, e.g. "Downloading Whisper… 45%"
+        self._progress   = None   # 0..1 while downloading, else None
         return self
 
     def isOpaque(self):
@@ -212,8 +214,12 @@ class _PillView(NSView):
         elif state == "loading":
             pulse = 0.55 + 0.45 * abs(math.sin(t * math.pi * 0.9))
             self._draw_logo(logo_cx, mid_y, logo_r)
-            self._draw_text("Loading model…", _IDLE_FONT, pulse, right_x, (h - 13) / 2, w,
+            text_y = (h - 13) / 2 + (3 if self._progress is not None else 0)  # room for the bar
+            self._draw_text(self._status or "Loading model…", _IDLE_FONT, pulse,
+                            right_x, text_y, w,
                             color=_col(1.0, 0.75, 0.35, pulse))  # amber — not ready yet
+            if self._progress is not None:
+                self._draw_progress(right_x, w - right_x - _RIGHT_PAD, self._progress)
 
         elif state == "success":
             self._draw_text("✓ Done", 13, 1.0, 0, (h - 15) / 2, w,
@@ -222,6 +228,18 @@ class _PillView(NSView):
         elif state == "error":
             self._draw_text("Error", 13, 1.0, 0, (h - 15) / 2, w,
                             center=True, color=_col(1.0, 0.25, 0.2, 0.95))
+
+    @objc.python_method
+    def _draw_progress(self, x, bar_w, fraction):
+        """Thin amber bar under the status text."""
+        y, bar_h = 6, 3
+        _col(1, 1, 1, 0.15).set()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(x, y, bar_w, bar_h), bar_h / 2, bar_h / 2).fill()
+        fill_w = max(bar_h, bar_w * min(max(fraction, 0.0), 1.0))
+        _col(1.0, 0.75, 0.35, 0.95).set()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(x, y, fill_w, bar_h), bar_h / 2, bar_h / 2).fill()
 
     @objc.python_method
     def _draw_logo(self, cx, cy, r):
@@ -308,6 +326,7 @@ class OverlayPanel:
         self._process_w = int(math.ceil(_H_H + _LOGO_GAP + spinner_diam + _RIGHT_PAD))
 
         self._minimized = False   # must be set before _frame_for is called
+        self._loading_w = self._idle_w   # grows with the status text, never shrinks mid-load
         f = self._frame_for("idle")
         self._panel = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             f, 0, 2, False,
@@ -345,6 +364,8 @@ class OverlayPanel:
     def _frame_for(self, state):
         if state == "recording":
             nw = self._record_w
+        elif state == "loading":
+            nw = self._loading_w
         elif self._minimized and state == "idle":
             nw = _MINI_W
         else:
@@ -379,6 +400,26 @@ class OverlayPanel:
 
     def set_state(self, state: str):
         _run_on_main(lambda: self._update(state))
+
+    def set_status(self, text: str | None, progress: float | None = None):
+        """Text (and optional 0..1 progress) shown in the loading state."""
+        _run_on_main(lambda: self._update_status(text, progress))
+
+    def _update_status(self, text, progress):
+        self._view._status   = text
+        self._view._progress = progress
+        if text is None:
+            self._loading_w = self._idle_w
+            return
+        # Widen to fit, but don't shrink as the numbers change — avoids jitter.
+        need = int(math.ceil(_H_H + _LOGO_GAP + _measure_text(text, _IDLE_FONT) + _RIGHT_PAD))
+        if need > self._loading_w:
+            self._loading_w = need
+            if self._view._state == "loading":
+                nf = self._frame_for("loading")
+                self._panel.setFrame_display_animate_(nf, True, False)
+                self._view.setFrame_(NSMakeRect(0, 0, nf.size.width, _H_H))
+        self._view.setNeedsDisplay_(True)
 
     def _update(self, state: str):
         nf = self._frame_for(state)

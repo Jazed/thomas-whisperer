@@ -156,8 +156,10 @@ class AppController(NSObject):
     def _load_models(self) -> None:
         """(Re)load the transcription engine and cleanup LLM. Hotkeys are ignored
         until this finishes so a dictation never hits a half-loaded model."""
-        import transcribe, cleanup
+        import transcribe, cleanup, downloads
         self._libs_ready = False
+        downloads.listener = self._overlay.set_status
+        self._overlay.set_status(None)
         if self._state == "idle":
             self._overlay.set_state("loading")
         try:
@@ -180,6 +182,7 @@ class AppController(NSObject):
         finally:
             self._libs_ready = True
             self._switching  = False
+            self._overlay.set_status(None)
             self._set_state_main("idle_done")
 
     # ------------------------------------------------------------------ menu bar
